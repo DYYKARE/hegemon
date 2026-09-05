@@ -70,11 +70,6 @@ export function isCoastalRegion(regionId: string): boolean {
   return (active?.regionSeas[regionId]?.length ?? 0) > 0;
 }
 
-// Bölgenin değdiği su hücreleri
-export function regionSeaCells(regionId: string): string[] {
-  return active?.regionSeas[regionId] ?? [];
-}
-
 // İki KIYI bölgesi aynı deniz havzasında mı (çıkarma rotası var mı)?
 // Havza = su hücrelerinin bağlı bileşeni; Hazar ile okyanus ayrı havzadır.
 export function seaReachable(a: string, b: string): boolean {

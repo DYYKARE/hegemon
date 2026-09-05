@@ -32,11 +32,21 @@ basit = onun ⅓'ü; Türkiye 7/20/81).
 ### 2.1 Gelir (tur başına)
 
 ```
-Gelir = Σ(il) [ nüfus × 5$ × vergiOranı
-              + eff(tarım) × %1
-              + eff(sanayi) × %1.5 ]
-      + Σ(fethedilen ülke) [ devralınan gelir + eff(yatırım) × %1.5 ]
+yerelGelir(bölge) = nüfus × 5$ × vergiOranı + eff(tarım) × %1 + eff(sanayi) × %1.5
+Gelir = Σ(bölge) yerelGelir + Σ(fethedilen ülke) [ devralınan gelir
+        + halkVergisi(gerçek nüfus × 5$ × vergi × %50 verim) + eff(kalkınma) × %1.5 ]
 ```
+
+**Tek doğru kaynak (2026-07-15):** bölge başına hesap `provinceLocalIncome`
+fonksiyonundadır; hem `computeIncome` hem tüm detay panelleri oradan okur —
+küresel ve yerel gösterge yapısal olarak sapamaz. Fethedilen ülkenin panel
+göstergesi `conqueredCountryTotalIncome` = devralınan + halk vergisi +
+kalkınma birikimi + **eyaletlerine yapılan yerel yatırımların geliri**.
+
+**İlhak/ele geçirilen bölgeye yatırım:** ele geçirilen (savaş sürerken) ve
+ilhak edilen (savaş sonrası) bölgeler de tarım/sanayi yatırımı alabilir —
+panel: bölge → "Yatırım Yap". Yatırım toprağa gömülüdür: bölge barış/geri
+çekilmeyle İADE edilirse yatırımlar da bölgeyle birlikte gider (gelir sızmaz).
 
 Tarım ve sanayinin getirileri bilinçli olarak YAKINDIR — asıl değerleri
 işlevlerindedir (aşağıda 2.6): tarım orduyu besler, sanayi silah üretir.
@@ -62,6 +72,7 @@ mutluluk ← mutluluk + (hedef − mutluluk) × 0.10   (her tur %10 yaklaşır)
 güç çarpanı = 0.6 + mutluluk/100 × 0.7            (0→0.6, ~57→1.0, 100→1.3)
 ```
 
+- Vergi %0.5 adımla ayarlanır (slider + hassas −/+ butonları, sınırlar %0–%100).
 - Güç çarpanı hem taarruz hem savunma gücünü ölçekler.
 - Savaş yorgunluğu: her tur mutluluktan düşer — saldırı savaşı 0.8, savunma 0.4,
   toplam tavan 3.
@@ -76,7 +87,8 @@ büyüme = %0.1 + %0.3 × min(1, kişiBaşıTarım / $100)   (tam beslenmede 4 k
 
 - Nüfus = vergi tabanı + asker havuzu (asker üretimi il nüfusundan düşer,
   terhiste geri döner).
-- Nüfus teşviki: $500 = 1 kişi.
+- Nüfus teşviki: $200 = 1 kişi ($500'dü; vergi amortisi 500 turdu — asıl işlevi
+  olan "acil asker havuzu" için makul fiyata çekildi, 2026-07-15).
 
 ### 2.4 Birim fiyatları ve bakım
 
@@ -199,6 +211,53 @@ fidye(il) = ilin TAM kapasite tur geliri × 30
   bölgeler iade edilir. 60 turda **zorunlu barış** (fidye ödenmez, işgal kalır).
   Ateşkes 40 tur sürer.
 
+### 3.7 Ordu Çağır (birlik toplama)
+
+Seçili ile, DİĞER illerden mobil birlik toplar (eski iki-tıklamalı "transfer"in
+listeli hali). Motor: `queueTransferOrder` (MOVE emirleri, tur sonunda varır;
+yoldaki birlik kaynağı %25 verimle savunur).
+
+- Panel: tür filtreleri (kara = asker+tank · hava = uçak, varsayılan işaretli)
+  → kaynak il listesi (il başına checkbox, filtre dışı tür üstü çizili)
+  → "Tüm Birlikler" + filtrelerle senkron dinamik toplam ve saldırı gücü.
+- Savunma yapıları (tabya, AA) ve gemiler SABİTTİR, taşınamaz — filtreler
+  yalnız mobil unsurları ayırır.
+- Aynı kaynak→hedef bekleyen emir düzenleme sayılır (Çağır üstüne yazar).
+
+### 3.8 Savaşı Bitir: İlhak Teklifi, Geri Çekilme, AI Kabul/Ret (2026-07-15)
+
+Harita savaşında normal barışa iki alternatif (motor: `mapWar.ts`):
+
+**İlhak Teklifi (`applyAnnexOffer`)** — ele geçirilen bölgeleri MASADA TUTARAK
+savaşı bitirme önerisi. AI karar puanı (kabul eşiği **50**):
+
+| Parametre | Koşul | Puan |
+|---|---|---|
+| Güç dengesi | oyuncuOrdu/AIOrdu > 1.5 | +20 |
+| Güç dengesi | oran < 0.8 | −25 |
+| AI savaş yorgunluğu | > %70 | +30 |
+| İşgal edilen bölge oranı | < %10 | +15 |
+| İşgal edilen bölge oranı | > %40 | −20 |
+| Stratejik değer | işgalde başkent (r0) veya şehir arazili bölge | −40 |
+
+```
+AI yorgunluğu = min(100, min(60, savaşSüresi×4) + kayıpOranı×60)
+```
+
+- Süre katkısı 60'ta TAVANLI: %70 eşiğini salt bekleyerek aşmak imkânsız —
+  düşmana ≥%17 gerçek kayıp verdirmek gerekir (savaşsız ilhak sömürüsü kapalı).
+- Varoluşsal ceza −20 (−30'du; 2026-07-16 denge): >%40 işgalde ilhak yalnız
+  ezici üstünlük + tam yorgunluk birleşince TAM eşikte (20+30−20=50) mümkün —
+  "ya hepsi ya iade" dayatması kalktı ama hâlâ en zor pazarlık bu.
+- Kabul: bölgeler KALICI ilhak, kalan garnizonlar anavatana döner, 40 tur
+  ateşkes. Ret: savaş sürer, teklif **5 tur** yenilenemez (`annexOffers`).
+- UI karar önizlemesini faktör dökümüyle gösterir (savaş kartı + ülke paneli).
+
+**Geri Çekilme (`retreatFromWar`)** — tek taraflı, bedelsiz çıkış:
+ele geçirilen TÜM bölgeler iade (yatırımlarıyla birlikte), birlikler yurda
+döner, **−8 mutluluk** (prestij) ve **15 turluk KISA ateşkes** (normal 40'a
+karşı — düşman erken dönebilir). Bedava barış değil, zararı kesmektir.
+
 ---
 
 ## 4. AI Davranışı
@@ -266,8 +325,8 @@ tüm komşular −15; barış → +20; AI sana savaş açarsa → −80; ültima
 
 | Eylem | Koşul | Bedel | Etki |
 |---|---|---|---|
-| Hediye | savaş yok | serbest tutar | +3 ilişki / (hedefin 1 tur geliri), tek seferde en çok +20 |
-| Ticaret Anlaşması | ilişki ≥ 0 | 1× gelir | her tur hedef gelirinin %5'i sana + taban +20 |
+| Hediye | savaş yok | serbest tutar | +3 ilişki / (hedefin 1 tur geliri), TUR başına ülke başına en çok +20 (spam ile eşik satın almayı kapatır — 2026-07-15) |
+| Ticaret Anlaşması | ilişki ≥ 0 | 1× gelir | her tur hedef gelirinin %3'ü sana + taban +20 (~33 tur amorti; %5 "herkesle imzala" dominant stratejisiydi) |
 | Saldırmazlık Paktı | ilişki ≥ 20 | 5× gelir | 25 tur İKİ taraf da saldıramaz |
 | İttifak | ilişki ≥ 60 | 10× gelir | saldırmaz + sana saldıranın kara komşusuysa ona cephe açar (AI-AI savaşı); ilişki < 30'a düşerse dağılır |
 | Ültimatom | güç ≥ 2× onun ordusu, ilişki > −60 | — | 5× gelir haraç alırsın, ilişki −40 |
@@ -316,3 +375,74 @@ ateşkes / pakt / ittifak / AI-AI savaşı riski "yok" yapar ve nedeni yazar.
   sınır savunması (tabya/ordu) gerçek bir ihtiyaçtır.
 - **Beklemenin bedeli**: AI her tur büyür (panelde görünür); erken savaş ucuz,
   geç savaş pahalıdır — ama savaş yorgunluğu art arda savaşı da cezalandırır.
+- **Savaştan çıkış bir karar üçgenidir**: normal barış (bedel öde, bölgeler
+  iade) · ilhak teklifi (bölgeler sende — AI matrisi kabul ederse) · geri
+  çekilme (bedelsiz ama topraksız + prestij kaybı). AI kabul eşiği aşıldığı
+  tur kendisi barış ister (🕊️ olayı) — oyuncu pazarlık gücünü haber alır.
+
+---
+
+## 7. Otomatik Play-Test Döngüsü (2026-07-15)
+
+`src/test/playtest.ts` — gerçek oyun içinde koşan Setup → Interact → Assert →
+Log → Loop koşucusu (yalnız DEV build'de yüklenir; `window.__hegemonTest`
+köprüsü GameUI'de DEV-only).
+
+**Tek komutla (başsız, önerilen):**
+
+```
+npm test            # ana suite — 6 senaryo / 71 assert (~15 sn)
+npm run test:guide  # rehber doğrulama matrisi — 3 ülke×zorluk×harita / 75 assert (~25 sn)
+npm run test:all    # tip kontrolü + ikisi birden
+```
+
+`scripts/playtest.mjs` kendi Vite'ını ayrı portta (3987) açar, sistemdeki
+Chrome'u başsız kullanır (playwright-core), `PLAYTEST_RESULT` özetini bekler
+ve pass/fail exit code döner — git hook'una ve CI'a takılabilir.
+`.github/workflows/playtest.yml` her push/PR'da ikisini de koşar.
+
+**Tarayıcıda izleyerek:** dev sunucuda `/?playtest=1` (ana suite) veya
+`/?playtest=guide` (rehber matrisi — MEVCUT KAYDI SİLER, her kombo için
+temiz oyun kurar). Rapor ekrana panel olarak çizilir.
+
+Ana suite kapsamı: vergi hassas adım + sınırlar · hitbox/popover
+etkileşimleri · Ordu Çağır filtre matematiği · yatırım-gelir senkronu ·
+savaş türü/garnizon tutarlılığı · ilhak matrisi (bağımsız implementasyonla
+karşılaştırmalı) + geri çekilme. Rehber matrisi: "Nasıl Oynanır" ekranındaki
+her iddia, farklı ülke/zorluk/haritada advanceTurn simülasyonuyla teyit edilir.
+
+## 6.1 Kayıt Sistemi: Çoklu Yuva (2026-07-17)
+
+`src/engine/save.ts` — her oyun kendi YUVASINA otomatik kaydedilir:
+
+- Anahtarlar: `hegemon_slots_v1` (meta index) · `hegemon_slot_<id>` (yuva
+  başına kayıt) · `hegemon_active_slot` (otomatik kaydın yazdığı imleç).
+  Eski tek anahtar (`hegemon_save_v1`) ilk erişimde bir yuvaya göç eder.
+- "Yeni Oyun" YIKICI DEĞİLDİR: yeni yuva açar (`startNewSlot`), ilk kaydı
+  hemen yazar; eski "kayıt silinecek" onay modalı kaldırıldı.
+- Ana menü → **Kayıtlar**: yuva listesi (ülke rengi + adı, tur, zorluk,
+  düzen, tarih) — Yükle / iki aşamalı Sil. "Devam Et" en son oynananı açar.
+- Oyun içi menüde **Kaydet ve Çık**: kaydeder, ana menüye döner.
+- Tam temizlik yalnız testlerde: `clearAllSaves()`.
+
+## 7.1 Playwright E2E Paketi (2026-07-17)
+
+Playtest paketleri MOTORU doğrular; `e2e/` paketi KULLANICI YOLUNU doğrular —
+Page Object Model (`e2e/pages/`), kritik HUD çapaları `data-testid` ile
+(turn-indicator/data-turn, treasury/data-money, next-turn):
+
+```
+npm run test:e2e          # başsız, 4 görünüm (masaüstü/tablet/mobil yatay+dikey)
+npm run test:e2e:headed   # izleyerek, yalnız masaüstü
+npx playwright show-report
+```
+
+Kapsam: ana menü + ayar kalıcılığı · yeni oyun/devam akışları · ÇOKLU YUVA
+(iki yuva ayrı yüklenir, silme iki aşamalı, eski kayıt göçü) · Kaydet ve Çık ·
+tur ilerleme ↔ localStorage senkronu · hızlı tıklama yarış durumu · arka plana
+alınınca otomatik oynatmanın durması · zafer/yenilgi bindirme geçişleri (DEV
+köprüsüyle kurulur) · HUD'un viewport içinde kalması (4 çözünürlük). Her test
+konsol hatalarını da toplar — sıfır olmayan konsol hatası koşumu kırar.
+
+CI: `.github/workflows/playwright.yml` her push/PR'da VE her gün 06:00 UTC'de
+koşar (günlük sağlık koşumu); başarısızlıkta HTML raporu artifact olarak düşer.

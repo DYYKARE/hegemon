@@ -1,9 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="tr">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Hegemon</title>
+
+    <!-- Tam ekran "Ana Ekrana Ekle" desteği. iOS Safari normal sekmede tam ekran
+         vermez; bu etiketler ana ekrana eklenince adres çubuğunu kaldırıp uygulamayı
+         tam ekran (standalone) açar. Android/Chrome için manifest devreye girer. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Hegemon" />
+    <meta name="theme-color" content="#020617" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
   </head>
   <body>
     <div id="root"></div>

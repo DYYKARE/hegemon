@@ -3,22 +3,6 @@ import type { MapLayout } from './settings';
 
 export type Difficulty = 'kolay' | 'orta' | 'zor';
 
-export interface EnemyProvince {
-  id: string;
-  name: string;
-  strength: number;
-  maxStrength: number;
-  isConquered: boolean;
-}
-
-// Cepheye gönderilmiş ordu: birlikler illerden AYRILIR ve bu havuzda savaşır.
-// Zayiat doğrudan buradan düşer; savaş bitince sağ kalanlar sınır iline döner.
-export interface FrontForce {
-  asker: number;
-  tank: number;
-  ucak: number;
-}
-
 export interface War {
   countryId: string;
   countryName: string;
@@ -28,13 +12,10 @@ export interface War {
   lastPlayerLoss: number; // son turda kaybedilen güç puanı (rapor için)
   lastEnemyLoss: number;
   initiator: 'player' | 'ai'; // savaşı kim açtı
-  // 'harita': graph tabanlı cephe savaşı (kara komşuları) — muharebeler emir
-  // kuyruğu + resolveTurn ile il il çözülür. 'topyekun' yalnız deniz aşırı.
-  // 'il_il' eski sistemden kalan tip; yüklemede 'harita'ya migrate edilir.
-  warType?: 'topyekun' | 'il_il' | 'harita';
-  provinces?: EnemyProvince[];
-  activeProvinceId?: string; // şu an çatışmanın sürdüğü rakip il id
-  front?: FrontForce; // cephe ordusu (yalnız oyuncunun açtığı savaşlarda)
+  // Tek savaş modeli: 'harita' — graph tabanlı cephe savaşı, muharebeler emir
+  // kuyruğu + resolveTurn ile bölge bölge çözülür. Eski kayıtlardaki havuz
+  // tipleri ('topyekun'/'il_il') yüklemede migrate edilir (save.ts).
+  warType?: 'harita';
 }
 
 export interface BattleReport {
@@ -75,6 +56,17 @@ export interface GameSave {
   // Oyuncunun ülkesi (ISO numeric id). Generic dünya modelinde herhangi bir ülke
   // olabilir; eski kayıtlarda yoksa Türkiye ('792') varsayılır.
   playerCountryId: string;
+  // Oyuncunun haritadaki toprak rengi (yeni oyunda seçilir). Eski kayıtlarda
+  // yoksa varsayılan mavi (#1d4ed8) kullanılır.
+  playerColor?: string;
+  // Hediye tur tavanı takibi: ülke id → bu tur kazanılan ilişki puanı.
+  // (Hediye spam'i tek turda −85 → +65 → ittifak zincirine izin veriyordu;
+  // tur başına ülke başına toplam GIFT_MAX_GAIN ile sınırlanır.)
+  giftGains?: Record<string, { turn: number; gained: number }>;
+  // Bağlama duyarlı başlangıç ipuçları kapatıldı mı (X'e basınca kalıcı)
+  tutorialDismissed?: boolean;
+  // Nasıl Oynanır rehberi görüldü mü (oyuna ilk girişte bir kez gösterilir)
+  guideSeen?: boolean;
   provinceUnits: Record<string, Record<string, number>>;
   provinceInvestments: Record<string, Record<string, number>>;
   conqueredCountryIds: string[];
@@ -83,6 +75,9 @@ export interface GameSave {
   occupiedProvinces: Record<string, string>; // il id → işgalci ülke id
   occupiedGarrisons: Record<string, number>; // il id → işgalci ordu gücü (garrison)
   truces: Record<string, number>; // ülke id → ateşkesin bittiği tur
+  // İlhak teklifi bekleme süresi: ülke id → yeni teklifin serbest kaldığı tur.
+  // Reddedilen "Savaşı Bitir (İlhak)" teklifi bu tura kadar yenilenemez.
+  annexOffers?: Record<string, number>;
   taxRate: number;       // 0.0 - 1.0 arası vergi oranı
   happiness: number;     // 0 - 100 arası mutluluk
   aiEconomy: Record<string, AiCountryEconomy>; // AI ülkelerin ekonomileri
@@ -112,8 +107,8 @@ export interface GameSave {
   // Tur içinde verilen emirler: state'i hemen değiştirmez, tur sonunda
   // resolveTurn tek seferde işler. Kayıtla birlikte saklanır.
   pendingOrders: MilitaryOrder[];
-  // Bu kaydın harita düzeni: bölge id'leri (ör. 051-p4) düzene bağlı olduğundan
-  // kayıt kendi düzenini hatırlar; yüklenince applyMapLayout ile geri yüklenir.
+  // Bu kaydın harita düzeni: bölge id'leri düzene bağlı olduğundan kayıt kendi
+  // düzenini hatırlar; yüklenirken dünya bu düzende kurulur (save.parseSlot).
   mapLayout: MapLayout;
 }
 

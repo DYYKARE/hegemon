@@ -1,15 +1,33 @@
 import React, { useRef, useState } from 'react';
-import { Globe2, Play, RotateCcw, ChevronLeft, Power, Settings, Check, Map, Search } from 'lucide-react';
+import { Globe2, Play, RotateCcw, ChevronLeft, Power, Settings, Check, Map, Search, FolderOpen, Trash2 } from 'lucide-react';
 import { Difficulty } from '../engine/types';
 import { MapLayout, MAP_LAYOUT_INFO, loadSettings, saveSettings } from '../engine/settings';
 import { FEATURED_COUNTRIES, COUNTRY_META, countryName } from '../engine/countryData';
+import { DEFAULT_PLAYER_COLOR, SaveSlotMeta } from '../engine/save';
 import { exitApplication } from '../platform';
 
 interface MainMenuProps {
   hasSave: boolean;
+  slots: SaveSlotMeta[];
   onContinue: () => void;
-  onNewGame: (difficulty: Difficulty, countryId: string) => void;
+  onNewGame: (difficulty: Difficulty, countryId: string, color: string) => void;
+  onLoadSlot: (id: string) => void;
+  onDeleteSlot: (id: string) => void;
 }
+
+// Oyuncunun seçebileceği toprak renkleri — canlı "faksiyon" tonları. İlki
+// varsayılan (mavi). Düşman kırmızısına yakın ton bilinçli dışarıda tutulmadı;
+// oyuncu isterse kırmızıyı da seçebilir (kendi imparatorluğu tek blok görünür).
+const PLAYER_COLORS: { name: string; value: string }[] = [
+  { name: 'Mavi', value: DEFAULT_PLAYER_COLOR },
+  { name: 'Camgöbeği', value: '#0891b2' },
+  { name: 'Deniz Yeşili', value: '#0d9488' },
+  { name: 'Yeşil', value: '#16a34a' },
+  { name: 'Mor', value: '#7c3aed' },
+  { name: 'Pembe', value: '#db2777' },
+  { name: 'Turuncu', value: '#ea580c' },
+  { name: 'Kızıl', value: '#dc2626' },
+];
 
 const MAP_LAYOUT_ORDER: MapLayout[] = ['basit', 'detayli', 'gercek'];
 
@@ -26,13 +44,16 @@ const DIFFICULTY_OPTIONS: { id: Difficulty; label: string; desc: string; color: 
   { id: 'zor', label: 'Zor', desc: 'Düşmanlar iki kat güçlü ve saldırgan', color: 'bg-red-700 hover:bg-red-600 active:bg-red-800' },
 ];
 
-export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
+export function MainMenu({ hasSave, slots, onContinue, onNewGame, onLoadSlot, onDeleteSlot }: MainMenuProps) {
   const [choosingCountry, setChoosingCountry] = useState(false);
   const [choosingDifficulty, setChoosingDifficulty] = useState(false);
   const [selectedCountry, setSelectedCountry] = useState<string>('792');
+  const [selectedColor, setSelectedColor] = useState<string>(DEFAULT_PLAYER_COLOR);
   const [countryQuery, setCountryQuery] = useState('');
   const [showSettings, setShowSettings] = useState(false);
-  const [confirmNewGame, setConfirmNewGame] = useState(false);
+  const [showSaves, setShowSaves] = useState(false);
+  // Silme iki aşamalı: ilk dokunuş yuvayı "emin misin?" durumuna alır
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [mapLayout, setMapLayout] = useState<MapLayout>(() => loadSettings().mapLayout);
 
   const selectLayout = (layout: MapLayout) => {
@@ -51,17 +72,11 @@ export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
     fn();
   };
 
-  // Kayıt varken onay oyun içi modalla alınır (window.confirm ana thread'i
-  // bloke eder; Android WebView'da da yerel diyalog yerine oyunun stili kullanılır)
+  // Yeni oyun artık YENİ yuvada başlar (mevcut kayıtlar silinmez) — eski
+  // "kayıt silinecek" onay modalı bu yüzden kaldırıldı.
   const startCountrySelection = () => {
-    setConfirmNewGame(false);
     setCountryQuery('');
     setChoosingCountry(true);
-  };
-
-  const handleNewGameClick = () => {
-    if (hasSave) setConfirmNewGame(true);
-    else startCountrySelection();
   };
 
   const pickCountry = (id: string) => {
@@ -144,11 +159,32 @@ export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
         </div>
       ) : choosingDifficulty ? (
         <div className="flex flex-col gap-3 w-80">
+          {/* Ülke rengi seçimi — haritada senin toprağın bu renkte olur */}
+          <div className="flex flex-col gap-2 mb-1">
+            <span className="text-[11px] text-slate-400 text-center tracking-wide">ÜLKE RENGİN</span>
+            <div className="flex items-center justify-center gap-2">
+              {PLAYER_COLORS.map(c => {
+                const active = selectedColor === c.value;
+                return (
+                  <button
+                    key={c.value}
+                    aria-label={`Renk: ${c.name}`}
+                    title={c.name}
+                    onClick={() => setSelectedColor(c.value)}
+                    className={`w-7 h-7 rounded-full transition-transform ${active ? 'ring-2 ring-white ring-offset-2 ring-offset-[#070d1b] scale-110' : 'hover:scale-105 opacity-80 hover:opacity-100'}`}
+                    style={{ backgroundColor: c.value }}
+                  >
+                    {active && <Check className="w-4 h-4 text-white mx-auto drop-shadow" />}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           {DIFFICULTY_OPTIONS.map(opt => (
             <button
               key={opt.id}
               aria-label={`${opt.label} zorlukta başla`}
-              onClick={guarded(() => onNewGame(opt.id, selectedCountry))}
+              onClick={guarded(() => onNewGame(opt.id, selectedCountry, selectedColor))}
               className={`flex flex-col items-center px-8 py-3 text-white font-bold rounded-lg transition-colors shadow-lg ${opt.color}`}
             >
               <span>{opt.label}</span>
@@ -173,7 +209,7 @@ export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
             </button>
           )}
           <button
-            onClick={guarded(handleNewGameClick)}
+            onClick={guarded(startCountrySelection)}
             className={`flex items-center justify-center gap-2 px-8 py-4 font-bold rounded-lg transition-colors ${
               hasSave
                 ? 'bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 border border-slate-700'
@@ -182,6 +218,14 @@ export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
           >
             <RotateCcw className="w-5 h-5" /> Yeni Oyun
           </button>
+          {slots.length > 0 && (
+            <button
+              onClick={() => { setConfirmDeleteId(null); setShowSaves(true); }}
+              className="flex items-center justify-center gap-2 px-8 py-3 bg-slate-800/60 hover:bg-slate-700 active:bg-slate-600 text-slate-300 hover:text-white font-medium rounded-lg transition-colors border border-slate-700/50"
+            >
+              <FolderOpen className="w-4 h-4" /> Kayıtlar ({slots.length})
+            </button>
+          )}
           <button
             onClick={() => setShowSettings(true)}
             className="flex items-center justify-center gap-2 px-8 py-3 bg-slate-800/60 hover:bg-slate-700 active:bg-slate-600 text-slate-300 hover:text-white font-medium rounded-lg transition-colors border border-slate-700/50"
@@ -197,31 +241,85 @@ export function MainMenu({ hasSave, onContinue, onNewGame }: MainMenuProps) {
         </div>
       )}
 
-      {/* Yeni oyun onayı: mevcut kayıt silinecek */}
-      {confirmNewGame && (
+      {/* Kayıtlar: yuva listesi — yükle / sil (iki aşamalı onay) */}
+      {showSaves && (
         <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-sm shadow-2xl">
-            <div className="flex items-center gap-2 mb-2">
-              <RotateCcw className="w-5 h-5 text-red-400" />
-              <h2 className="text-lg font-black tracking-wide text-white">YENİ OYUN</h2>
+          <div className="relative bg-slate-900 border border-slate-700 rounded-2xl p-6 w-full max-w-md shadow-2xl">
+            <div className="flex items-center gap-2 mb-1">
+              <FolderOpen className="w-5 h-5 text-amber-400" />
+              <h2 className="text-lg font-black tracking-wide text-white">KAYITLAR</h2>
             </div>
-            <p className="text-sm text-slate-400 mb-5">
-              Mevcut kayıt silinecek. Yeni oyuna başlamak istediğine emin misin?
+            <p className="text-[11px] text-slate-500 mb-4">
+              Her oyun kendi yuvasına otomatik kaydedilir. Bir kaydı yükle veya sil.
             </p>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setConfirmNewGame(false)}
-                className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 font-medium rounded-lg transition-colors border border-slate-700"
-              >
-                Vazgeç
-              </button>
-              <button
-                onClick={guarded(startCountrySelection)}
-                className="flex-1 py-2.5 bg-red-700 hover:bg-red-600 active:bg-red-800 text-white font-bold rounded-lg transition-colors"
-              >
-                Evet, Başla
-              </button>
+
+            <div className="flex flex-col gap-2 max-h-[50vh] overflow-y-auto pr-1">
+              {slots.map(slot => {
+                const confirming = confirmDeleteId === slot.id;
+                return (
+                  <div
+                    key={slot.id}
+                    data-testid="save-slot"
+                    className="flex items-center gap-3 p-3 rounded-xl bg-slate-950 border border-slate-700/50"
+                  >
+                    <span className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: slot.playerColor }} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-bold text-slate-200 truncate">
+                        {countryName(slot.countryId)}
+                        {slot.conquests > 0 && <span className="text-amber-400 font-normal"> · {slot.conquests} fetih</span>}
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        Tur {slot.turn} · {DIFFICULTY_OPTIONS.find(d => d.id === slot.difficulty)?.label ?? slot.difficulty}
+                        {' · '}{MAP_LAYOUT_INFO[slot.mapLayout as MapLayout]?.label ?? slot.mapLayout}
+                        {' · '}{new Date(slot.updatedAt).toLocaleString('tr-TR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                      </div>
+                    </div>
+                    {confirming ? (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => { setConfirmDeleteId(null); onDeleteSlot(slot.id); }}
+                          className="px-2.5 py-1.5 bg-red-700 hover:bg-red-600 text-white text-xs font-bold rounded-lg transition-colors"
+                        >
+                          Sil
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs rounded-lg border border-slate-700 transition-colors"
+                        >
+                          Vazgeç
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => { setShowSaves(false); onLoadSlot(slot.id); }}
+                          className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs font-bold rounded-lg transition-colors"
+                        >
+                          <Play className="w-3 h-3" /> Yükle
+                        </button>
+                        <button
+                          aria-label={`${countryName(slot.countryId)} kaydını sil`}
+                          onClick={() => setConfirmDeleteId(slot.id)}
+                          className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-red-950/40 rounded-lg transition-colors"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {slots.length === 0 && (
+                <div className="text-center text-slate-500 text-xs py-6">Kayıt yok.</div>
+              )}
             </div>
+
+            <button
+              onClick={() => setShowSaves(false)}
+              className="mt-5 w-full py-2.5 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white font-bold rounded-lg transition-colors"
+            >
+              Kapat
+            </button>
           </div>
         </div>
       )}

@@ -8,6 +8,17 @@ html {
   text-rendering: optimizeLegibility;
 }
 
+/* Çentikli/yuvarlak köşeli ekranlar (viewport-fit=cover): yatayda içerik
+   güvenli alana oturur; çentik altında buton kalmaz. Kenar boşluğu çentiksiz
+   cihazlarda 0'dır — düzeni etkilemez. Arka plan tema renginde: kaplanmayan
+   şerit ve açılış anında beyaz flaş görünmez. */
+html, body { background: #020617; }
+#root {
+  min-height: 100dvh;
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
 /* İnce, koyu temaya uyumlu kaydırma çubukları (WebView/Chrome) */
 *::-webkit-scrollbar { width: 6px; height: 6px; }
 *::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, 0.45); border-radius: 3px; }
@@ -23,3 +34,31 @@ html {
   to { opacity: 1; transform: none; }
 }
 .panel-in { animation: panel-in 220ms cubic-bezier(0.16, 1, 0.3, 1); }
+
+/* Oyun genelinde tüm butonlar: çift-dokunma zoom beklemesi olmadan anlık tepki */
+button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+
+/* --- Dokunma hedefi genişletme (hitbox) --- */
+/* Görsel boyutu DEĞİŞTİRMEDEN tıklanabilir alanı büyütür: ::after pseudo-elementi
+   butonun çeperine taşan görünmez bir yüzey serer (pseudo-element hit-testing'de
+   sahibine sayılır). Hedef: ≥44px dokunma alanı (Apple HIG / WCAG 2.5.8).
+   -sm varyantı yan yana dizili buton grupları için — komşu hitbox'lar çakışmasın. */
+.hit-target,
+.hit-target-sm {
+  position: relative;
+  touch-action: manipulation; /* çift-dokunma zoom beklemesini kaldırır → gecikmesiz tepki */
+  -webkit-tap-highlight-color: transparent; /* geri bildirimi press-fx verir, gri flaş olmasın */
+}
+.hit-target::after,
+.hit-target-sm::after { content: ''; position: absolute; }
+.hit-target::after { inset: -12px; }
+.hit-target-sm::after { inset: -6px; }
+
+/* Basılma geri bildirimi: :active dokunmatikte touchstart anında tetiklenir,
+   genişletilmiş hitbox'a dokunulduğunda da çalışır (aynı elementtir).
+   Renk geçişleri de listede — Tailwind'in transition-colors'ını ezmesin. */
+.press-fx {
+  transition: transform 80ms ease, opacity 80ms ease,
+    background-color 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+.press-fx:active { transform: scale(0.96); opacity: 0.85; }

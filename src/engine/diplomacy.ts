@@ -199,9 +199,26 @@ export function applyPeaceDiplomacy(save: GameSave, countryId: string): GameSave
 
 // --- Diplomatik eylemler (UI çağırır; para yetmez/koşul tutmazsa null) ---
 
+// Bu tur bu ülkeye hediyeyle kazanılmış ilişki puanı (tur tavanı takibi)
+export function giftGainedThisTurn(save: GameSave, countryId: string): number {
+  const g = save.giftGains?.[countryId];
+  return g && g.turn === save.turn ? g.gained : 0;
+}
+
+// Bu tur bu ülkeden hâlâ kazanılabilecek ilişki puanı. GIFT_MAX_GAIN artık
+// hediye BAŞINA değil TUR BAŞINA tavandır: aynı turda hediye spam'iyle
+// −85 → +65 → ittifak zinciri mümkündü (2026-07-15 hardcore testi) — diplomasi
+// eşikleri parayla tek turda satın alınamasın, zaman/planlama istesin.
+export function giftRemainingThisTurn(save: GameSave, countryId: string): number {
+  return Math.max(0, GIFT_MAX_GAIN - giftGainedThisTurn(save, countryId));
+}
+
 export function giftRelationGain(save: GameSave, countryId: string, amount: number): number {
   const income = Math.max(1, getAiEconomy(save, countryId).income);
-  return Math.min(GIFT_MAX_GAIN, Math.floor(GIFT_RELATION_PER_INCOME * amount / income));
+  return Math.min(
+    giftRemainingThisTurn(save, countryId),
+    Math.floor(GIFT_RELATION_PER_INCOME * amount / income)
+  );
 }
 
 export function sendGift(save: GameSave, countryId: string, amount: number): GameSave | null {
@@ -212,10 +229,19 @@ export function sendGift(save: GameSave, countryId: string, amount: number): Gam
   if (gain < 1) return null;
   const relations = { ...(save.relations ?? {}) };
   relations[countryId] = clampRelation((relations[countryId] ?? 0) + gain);
-  return { ...save, money: save.money - amount, relations };
+  return {
+    ...save,
+    money: save.money - amount,
+    relations,
+    giftGains: {
+      ...(save.giftGains ?? {}),
+      [countryId]: { turn: save.turn, gained: giftGainedThisTurn(save, countryId) + gain },
+    },
+  };
 }
 
 export function signPact(save: GameSave, countryId: string): GameSave | null {
+  if (save.conqueredCountryIds.includes(countryId)) return null; // ülke artık yok
   const cost = getAiEconomy(save, countryId).income * PACT_COST_INCOMES;
   if (cost > save.money) return null;
   if (getRelation(save, countryId) < PACT_MIN_RELATION) return null;
@@ -232,6 +258,7 @@ export function signPact(save: GameSave, countryId: string): GameSave | null {
 }
 
 export function formAlliance(save: GameSave, countryId: string): GameSave | null {
+  if (save.conqueredCountryIds.includes(countryId)) return null; // ülke artık yok
   const cost = getAiEconomy(save, countryId).income * ALLIANCE_COST_INCOMES;
   if (cost > save.money) return null;
   if (getRelation(save, countryId) < ALLIANCE_MIN_RELATION) return null;
@@ -248,6 +275,7 @@ export function formAlliance(save: GameSave, countryId: string): GameSave | null
 }
 
 export function signTradeDeal(save: GameSave, countryId: string): GameSave | null {
+  if (save.conqueredCountryIds.includes(countryId)) return null; // ülke artık yok
   const cost = getAiEconomy(save, countryId).income * TRADE_COST_INCOMES;
   if (cost > save.money) return null;
   if (getRelation(save, countryId) < TRADE_MIN_RELATION) return null;
@@ -263,6 +291,9 @@ export function signTradeDeal(save: GameSave, countryId: string): GameSave | nul
 // Ültimatom: ezici güç üstünlüğüyle haraç alınır — ilişkiye kalıcı yara.
 // Zaten düşmanca (−60 altı) ülke boyun eğmez: parayı değil savaşı seçer.
 export function sendUltimatum(save: GameSave, countryId: string, playerPower: number): GameSave | null {
+  // Fethedilmiş ülkeden haraç alınamaz: ülke yok, "geliri" defaultAiEconomy'den
+  // dirilip bedava para basıyordu (2026-07-17 exploit bulgusu — bayat panel riski).
+  if (save.conqueredCountryIds.includes(countryId)) return null;
   if (save.wars.some(w => w.countryId === countryId)) return null;
   if (isAlly(save, countryId) || pactActive(save, countryId)) return null;
   if (getRelation(save, countryId) <= ULTIMATUM_MIN_RELATION) return null;
@@ -349,8 +380,12 @@ export function diplomacyStatus(save: GameSave, countryId: string, playerPower: 
   };
 }
 
-// UI ipucu metni: hediye maliyet merdiveni
+// UI ipucu metni: hediye maliyet merdiveni + bu turki kalan tavan
 export function giftHint(save: GameSave, countryId: string): string {
   const income = getAiEconomy(save, countryId).income;
-  return `${formatMoney(income)} hediye ≈ +${GIFT_RELATION_PER_INCOME} ilişki (tek seferde en çok +${GIFT_MAX_GAIN})`;
+  const remaining = giftRemainingThisTurn(save, countryId);
+  const cap = remaining < GIFT_MAX_GAIN
+    ? `bu tur kalan: +${remaining}`
+    : `tur başına en çok +${GIFT_MAX_GAIN}`;
+  return `${formatMoney(income)} hediye ≈ +${GIFT_RELATION_PER_INCOME} ilişki (${cap})`;
 }

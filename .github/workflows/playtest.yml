@@ -1,0 +1,27 @@
+# Otomatik regresyon: her push/PR'da tip kontrolü + iki başsız test paketi.
+# GitHub'a itildiği anda çalışır; ubuntu koşucularında Chrome hazır gelir
+# (playwright-core channel:'chrome' onu kullanır, ayrıca tarayıcı indirilmez).
+name: Play-Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  playtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tip kontrolü
+        run: npm run lint
+      - name: Ana play-test suite (71 assert)
+        run: npm test
+      - name: Rehber doğrulama matrisi (75 assert, 3 kombo)
+        run: npm run test:guide

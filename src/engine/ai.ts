@@ -23,18 +23,26 @@ const MAX_CHANCE_PER_TURN = 0.15;       // tek ülkenin tur başına savaş açm
 const MAX_SIMULTANEOUS_AI_WARS = 2;     // aynı anda en fazla bu kadar AI istilası (akbaba sınırı)
 
 // --- AI ülkeler arası rekabet ---
-// Tarihî/coğrafi rakip çiftler: aralarında savaş patlak verebilir.
-const AI_RIVAL_PAIRS: [string, string][] = [
-  ['300', '100'], // Yunanistan – Bulgaristan
-  ['051', '031'], // Ermenistan – Azerbaycan
-  ['364', '368'], // İran – Irak
-  ['760', '368'], // Suriye – Irak
-  ['268', '051'], // Gürcistan – Ermenistan
-];
+// Rakip çiftler JENERİK üretilir: oyuncunun cephe komşuları arasında birbirine
+// kara sınırı olan her ikili adaydır. (Eski sabit AI_RIVAL_PAIRS yalnız Türkiye
+// komşularını kapsıyordu — başka ülkeyle oyunda özellik hiç tetiklenmiyordu.)
 const AI_WAR_CHANCE = 0.005;      // çift başına tur başına patlak verme şansı
 const AI_WAR_ATTRITION = 0.03;    // savaşan iki taraf da her tur gücünün %3'ünü yitirir
 const AI_WAR_MAX_TURNS = 15;      // en geç bu kadar turda biter
 const AI_WAR_SURRENDER = 0.5;     // taban gücünün altına düşen taraf pes eder
+const MAX_AI_AI_WARS = 3;         // aynı anda en çok bu kadar AI-AI savaşı (yoğun bölgede kaos frenlemesi)
+
+// Oyuncunun cephe komşuları arasındaki kara-komşusu ikililer (a < b, tekil)
+function aiRivalPairs(neighborIds: string[]): [string, string][] {
+  const set = new Set(neighborIds);
+  const pairs: [string, string][] = [];
+  for (const a of neighborIds) {
+    for (const b of countryLandNeighbors(a)) {
+      if (a < b && set.has(b)) pairs.push([a, b]);
+    }
+  }
+  return pairs;
+}
 
 export function getAiMilitary(save: GameSave, countryId: string): number {
   return save.aiMilitary[countryId] ?? getCountryStats(countryId, save.difficulty).military;
@@ -292,9 +300,10 @@ export function advanceAiCountries(save: GameSave): { save: GameSave; events: Tu
     }
   }
 
-  // --- Yeni AI-AI savaşları patlak verebilir ---
+  // --- Yeni AI-AI savaşları patlak verebilir (jenerik komşu-çifti üretimi) ---
   if (save.turn > settings.graceTurns) {
-    for (const [a, d] of AI_RIVAL_PAIRS) {
+    for (const [a, d] of aiRivalPairs(neighborIds)) {
+      if (survivingAiWars.length >= MAX_AI_AI_WARS) break;
       const isBusy = (id: string) =>
         save.conqueredCountryIds.includes(id)
         || survivingAiWars.some(x => x.attackerId === id || x.defenderId === id)

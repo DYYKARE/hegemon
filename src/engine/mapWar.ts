@@ -20,7 +20,8 @@ import {
   TERRAIN_DEFENSE_BONUS, DECISIVE_RATIO, REPEL_RATIO,
 } from './frontline/resolveTurn';
 import { getCountryStats } from './countries';
-import { happinessMultiplier, getAiEconomy, formatMoney, formatCount, UNIT_COSTS } from './economy';
+import { happinessMultiplier, clampHappiness, getAiEconomy, formatMoney, formatCount, UNIT_COSTS } from './economy';
+import { applyPeaceDiplomacy } from './diplomacy';
 import { regionNeighbors, regionCountry, regionName, countryRegions, countryLandNeighbors, isCoastalRegion, seaReachable } from './activeWorld';
 import { countryName as countryDisplayName } from './countryData';
 
@@ -159,6 +160,7 @@ export function allBorderRegions(save: GameSave): string[] {
   return heldRegions(save).filter(rid =>
     regionNeighbors(rid).some(n => !isPlayerRegion(save, n)));
 }
+
 const MAX_WAR_DURATION = 60;                 // combat.ts ile aynı: zorunlu barış sınırı
 const TRUCE_DURATION = 40;
 
@@ -180,11 +182,6 @@ const AI_AA_SHARE = 0.15;
 
 export function countryOfProvince(provId: string): string {
   return regionCountry(provId);
-}
-
-// Generic dünyada tüm savaşlar kara-graf ('harita'); bölgesi olan her ülke hedeftir.
-export function isLandNeighbor(countryId: string): boolean {
-  return countryRegions(countryId).length > 0;
 }
 
 export function getProvinceNeighbors(provId: string): string[] {
@@ -339,6 +336,7 @@ export function releaseCountryProvinces(save: GameSave, countryId: string): Game
 
   const enemyProvinceStrength = { ...save.enemyProvinceStrength };
   const provinceUnits = { ...save.provinceUnits };
+  const provinceInvestments = { ...save.provinceInvestments };
   let capturedEnemyProvinces = [...(save.capturedEnemyProvinces ?? [])];
   let homeland = save.aiMilitary[countryId] ?? 0;
   const homeId = anyPlayerRegion(save);
@@ -355,6 +353,10 @@ export function releaseCountryProvinces(save: GameSave, countryId: string): Game
         provinceUnits[homeId] = home;
         delete provinceUnits[rid];
       }
+      // Yatırım toprağa gömülüdür: bölge iade edilince tarım/sanayi/nüfus da
+      // gider — yoksa kaybedilen bölgenin geliri hazineye sızmaya devam ederdi
+      // (ilhak toprağına yatırım açılınca gerçek risk oldu, 2026-07-15).
+      delete provinceInvestments[rid];
     }
   }
 
@@ -363,6 +365,7 @@ export function releaseCountryProvinces(save: GameSave, countryId: string): Game
     enemyProvinceStrength,
     capturedEnemyProvinces,
     provinceUnits,
+    provinceInvestments,
     aiMilitary: { ...save.aiMilitary, [countryId]: Math.round(homeland) },
   };
 }
@@ -379,6 +382,189 @@ export function countryRemainingStrength(save: GameSave, countryId: string): num
   let total = save.aiMilitary[countryId] ?? 0;
   for (const rid of countryRegions(countryId)) total += save.enemyProvinceStrength[rid] ?? 0;
   return Math.round(total);
+}
+
+// --- İşgal Modu: Savaşı Bitir (İlhak), Geri Çekilme ve AI Kabul/Ret ---
+// Oyuncu, ele geçirdiği bölgeleri MASADA TUTARAK savaşı bitirmeyi teklif eder;
+// düşman AI puan matrisine göre kabul/ret kararı verir (puan >= eşik → kabul).
+
+export const ANNEX_ACCEPT_THRESHOLD = 50;  // karar puanı eşiği
+export const ANNEX_OFFER_COOLDOWN = 5;     // reddedilen teklif bu kadar tur yenilenemez
+export const RETREAT_TRUCE_DURATION = 15;  // geri çekilme ateşkesi KISA (normal barış: 40)
+export const RETREAT_HAPPINESS_COST = 8;   // geri çekilmenin prestij bedeli (mutluluk puanı)
+
+export interface AnnexFactor { label: string; delta: number }
+export interface AnnexDecision {
+  score: number;
+  accepted: boolean;
+  factors: AnnexFactor[];
+  capturedCount: number;
+  totalRegions: number;
+  weariness: number; // AI savaş yorgunluğu (0–100)
+}
+
+// Başkent: ülkenin ilk bölgesi (r0) başkent sayılır — ayrı başkent verisi yok,
+// deterministik kabul. Mega-şehir = 'sehir' arazili bölge (terrainOf).
+export function isCapitalRegion(rid: string): boolean {
+  return rid.endsWith('-r0');
+}
+
+// AI savaş yorgunluğu (0–100): AI'nin ayrı bir mutluluk sistemi yok; süre ve
+// ordu kaybından türetilir. Süre katkısı tur başına +4 ama 60'TA TAVANLANIR:
+// yorgunluk eşiğini (%70, +30 puan) salt bekleyerek aşmak mümkün olmasın —
+// savaşsız 18 tur bekleyip bedava ilhak koparma sömürüsünü kapatır (2026-07-15
+// denge). Eşiği aşmak için düşmana gerçek kayıp (%17+) verdirmek gerekir.
+export function aiWarWeariness(save: GameSave, war: War): number {
+  const duration = Math.max(0, save.turn - war.startedTurn);
+  const lossRatio = war.enemyMaxStrength > 0
+    ? Math.max(0, 1 - war.enemyStrength / war.enemyMaxStrength) : 0;
+  return Math.min(100, Math.round(Math.min(60, duration * 4) + lossRatio * 60));
+}
+
+// Karar matrisi (docs/prompt şablonuyla birebir):
+//   Güç oranı (oyuncu/AI) > 1.5 → +20 · < 0.8 → −25
+//   AI savaş yorgunluğu > %70 → +30
+//   İşgal edilen bölge oranı < %10 → +15 · > %40 → −30
+//   İşgalde başkent/mega-şehir varsa → −40
+// playerPower: HUD'daki toplam saldırı gücü (computeTotalAttackPower) —
+// mapWar combat'ı import edemez (döngü olur), değer parametreyle gelir;
+// böylece oyuncunun panelde gördüğü sayı ile AI'nin okuduğu sayı hep aynıdır.
+export function evaluateAnnexOffer(
+  save: GameSave,
+  countryId: string,
+  playerPower: number
+): AnnexDecision | null {
+  const war = save.wars.find(w => w.countryId === countryId);
+  if (!war) return null;
+  const regs = countryRegions(countryId);
+  if (regs.length === 0) return null; // bölgesiz ülkeyle ilhak pazarlığı olmaz
+  const captured = regs.filter(id => (save.capturedEnemyProvinces ?? []).includes(id));
+  const factors: AnnexFactor[] = [];
+
+  const aiPower = Math.max(1, countryRemainingStrength(save, countryId));
+  const powerRatio = playerPower / aiPower;
+  if (powerRatio > 1.5) {
+    factors.push({ label: `Ezici askeri üstünlük (${powerRatio.toFixed(1)}x)`, delta: 20 });
+  } else if (powerRatio < 0.8) {
+    factors.push({ label: `Düşman askeri üstün (${powerRatio.toFixed(1)}x)`, delta: -25 });
+  }
+
+  const weariness = aiWarWeariness(save, war);
+  if (weariness > 70) {
+    factors.push({ label: `Savaş yorgunluğu %${weariness} — halkı barış istiyor`, delta: 30 });
+  }
+
+  const occupationRatio = regs.length > 0 ? captured.length / regs.length : 0;
+  if (occupationRatio < 0.10) {
+    factors.push({ label: 'Kayıp küçük bir sınır bölgesi (<%10)', delta: 15 });
+  } else if (occupationRatio > 0.40) {
+    // −30 → −20 (2026-07-16 denge): −30'da >%40 işgalde ilhak matematiksel
+    // olarak İMKANSIZDI (maks +20+30−30=20 < 50) — küçük ülkelerde "ya hepsi
+    // ya iade" dayatıyordu. −20 ile ancak ezici üstünlük + tam yorgunluk
+    // birleşirse eşik TAM tutturulur (20+30−20=50): zor ama mümkün.
+    factors.push({ label: 'Toprak kaybı varoluşsal (>%40) — sonuna dek savaşır', delta: -20 });
+  }
+
+  const strategic = captured.some(rid => isCapitalRegion(rid) || terrainOf(rid) === 'sehir');
+  if (strategic) {
+    factors.push({ label: 'İşgalde başkent/mega-şehir var — kolay teslim edilemez', delta: -40 });
+  }
+
+  const score = factors.reduce((s, f) => s + f.delta, 0);
+  return {
+    score,
+    accepted: score >= ANNEX_ACCEPT_THRESHOLD,
+    factors,
+    capturedCount: captured.length,
+    totalRegions: regs.length,
+    weariness,
+  };
+}
+
+// "Savaşı Bitir" teklifini UYGULAR. Kabulde: ele geçirilen bölgeler kalıcı
+// İLHAK edilir (capturedEnemyProvinces'ta kalır — oyuncu toprağı olarak
+// yaşamaya devam ederler), kalan bölge garnizonları anavatana döner, savaş
+// biter, normal ateşkes başlar. Redde: savaş sürer, teklif COOLDOWN boyunca
+// yenilenemez. Karar her iki durumda da döner (UI sonucu gösterir).
+export function applyAnnexOffer(
+  save: GameSave,
+  countryId: string,
+  playerPower: number
+): { save: GameSave; decision: AnnexDecision } | null {
+  const decision = evaluateAnnexOffer(save, countryId, playerPower);
+  if (!decision) return null;
+  if (save.turn < (save.annexOffers?.[countryId] ?? 0)) return { save, decision }; // bekleme süresi
+
+  if (!decision.accepted) {
+    return {
+      save: {
+        ...save,
+        annexOffers: { ...(save.annexOffers ?? {}), [countryId]: save.turn + ANNEX_OFFER_COOLDOWN },
+      },
+      decision,
+    };
+  }
+
+  const captured = new Set(
+    (save.capturedEnemyProvinces ?? []).filter(rid => regionCountry(rid) === countryId));
+
+  // Kalan (ele geçirilmemiş) bölge garnizonları anavatana katılır
+  const enemyProvinceStrength = { ...save.enemyProvinceStrength };
+  let homeland = save.aiMilitary[countryId] ?? 0;
+  for (const rid of countryRegions(countryId)) {
+    if (captured.has(rid)) continue;
+    homeland += enemyProvinceStrength[rid] ?? 0;
+    delete enemyProvinceStrength[rid];
+  }
+
+  let next: GameSave = {
+    ...save,
+    enemyProvinceStrength,
+    aiMilitary: { ...save.aiMilitary, [countryId]: Math.round(homeland) },
+    wars: save.wars.filter(w => w.countryId !== countryId),
+    truces: { ...save.truces, [countryId]: save.turn + TRUCE_DURATION },
+    annexOffers: { ...(save.annexOffers ?? {}), [countryId]: 0 },
+    // Bu ülkeyi hedefleyen emirler düşer; İLHAK edilen (artık bizim) bölgelere
+    // birlik taşıyan MOVE emirleri yaşar.
+    pendingOrders: (save.pendingOrders ?? []).filter(o => {
+      const cid = save.occupiedProvinces[o.to] ?? regionCountry(o.to);
+      if (cid !== countryId) return true;
+      return o.type === 'MOVE' && captured.has(o.to);
+    }),
+  };
+  next = applyPeaceDiplomacy(next, countryId);
+  return { save: next, decision };
+}
+
+// Geri Çekilme: savaşı TEK TARAFLI bitirir — barış bedeli ödenmez ama ele
+// geçirilen her bölge İADE edilir, birlikler yurda döner, prestij düşer
+// (mutluluk −RETREAT_HAPPINESS_COST) ve ateşkes kısadır: düşman erken
+// dönebilir. "Bedava barış" değildir, kesilen zarardır. (Düşmanın işgal
+// ettiği İLLERİMİZ varsa onlar geri VERİLMEZ — fidyesiz çıkışın bedeli.)
+//
+// Ateşkes yalnız GERÇEKTEN savaşılmış savaşta doğar: "ilan et + hemen geri
+// çekil" kombosu 15 turluk saldırı kalkanına dönüşüyordu (−8 mutlulukla
+// tehlikeli komşu bedavaya kilitleniyordu — 2026-07-17 simülasyon bulgusu).
+// Bu eşikten kısa savaşta geri çekilme savaşı bitirir ama ateşkes VERMEZ.
+export const RETREAT_TRUCE_MIN_WAR_TURNS = 3;
+export function retreatFromWar(save: GameSave, countryId: string): GameSave {
+  const war = save.wars.find(w => w.countryId === countryId);
+  if (!war) return save;
+  const foughtLongEnough = save.turn - war.startedTurn >= RETREAT_TRUCE_MIN_WAR_TURNS;
+  let next = releaseCountryProvinces(save, countryId);
+  next = {
+    ...next,
+    wars: next.wars.filter(w => w.countryId !== countryId),
+    truces: foughtLongEnough
+      ? { ...next.truces, [countryId]: next.turn + RETREAT_TRUCE_DURATION }
+      : next.truces,
+    happiness: clampHappiness((next.happiness ?? 70) - RETREAT_HAPPINESS_COST),
+    pendingOrders: (next.pendingOrders ?? []).filter(o => {
+      const cid = next.occupiedProvinces[o.to] ?? regionCountry(o.to);
+      return cid !== countryId;
+    }),
+  };
+  return applyPeaceDiplomacy(next, countryId);
 }
 
 // --- Dünya grafını kur (Single Source of Truth: GameSave → ProvinceMap) ---
@@ -617,13 +803,6 @@ export function airBases(save: GameSave, targetId: string): string[] {
     .filter(id => (save.provinceUnits[id]?.ucak ?? 0) > 0
       && isPlayerTerritory(save, id)
       && !adjacent.has(id)); // komşu üsler zaten attackSources'ta (kara+hava birlikte)
-}
-
-// Bölgeden verilebilecek taarruz emrinin türü: komşuysa kara+hava, değilse yalnız hava
-export function sourceOrderKind(save: GameSave, sourceId: string, targetId: string): 'land' | 'air' | 'sea' {
-  if (getProvinceNeighbors(targetId).includes(sourceId)) return 'land';
-  if (seaAttackSources(save, targetId).includes(sourceId)) return 'sea';
-  return 'air';
 }
 
 // Bir hedefe taarruz emri verilebilir mi? (işgal altındaki TR ili her zaman;

@@ -7,7 +7,6 @@ import {
   seaAttackSources, shipCapacityOf, seaLiftWeight, SEA_WEIGHT,
 } from '../engine/mapWar';
 import { TERRAIN_DEFENSE_BONUS } from '../engine/frontline/resolveTurn';
-import { PROVINCE_NAMES } from '../engine/geography';
 import { formatCount } from '../engine/economy';
 
 // Taarruz emri modalı: hedefe komşu illerden birlik seçilir, emir KUYRUĞA yazılır
@@ -32,7 +31,7 @@ const OUTCOME_CONFIG = {
   },
   attrition: {
     label: 'YIPRATMA SAVAŞI', color: 'text-yellow-400', border: 'border-yellow-700/60', bg: 'bg-yellow-950/30',
-    hint: '0.8 < R < 1.5 — bölge düşmez, iki taraf da zayiat verir. Takviyeyle oranı yükselt.',
+    hint: '0.8 < R < 1.5 — bölge düşmez, iki taraf da zayiat verir. Dikkat: savunan her tur anavatandan takviye alır, beklersen R DÜŞER — ya tek seferde ezici güç yığ ya hiç girme.',
   },
   repelled: {
     label: 'TAARRUZ KIRILIR', color: 'text-red-400', border: 'border-red-700/60', bg: 'bg-red-950/40',
@@ -163,7 +162,7 @@ export function AttackOrderModal({ save, targetId, targetName, onQueue, onClose 
           )}
           {sources.map(provId => {
             const avail = availableAt(provId);
-            const name = PROVINCE_NAMES[provId] ?? provinceDisplayName(provId);
+            const name = provinceDisplayName(provId);
             const isEmpty = avail.asker === 0 && avail.tank === 0 && avail.ucak === 0;
             if (isEmpty) {
               return (
@@ -200,7 +199,7 @@ export function AttackOrderModal({ save, targetId, targetName, onQueue, onClose 
                 // Kalan ağırlığa göre dinamik tavan: toplam yük kapasiteyi aşamaz
                 const askerMax = Math.min(avail.asker, cur.asker + Math.max(0, cap - usedW));
                 const tankMax = Math.min(avail.tank, cur.tank + Math.max(0, Math.floor((cap - usedW) / SEA_WEIGHT.tank)));
-                const name = PROVINCE_NAMES[provId] ?? provinceDisplayName(provId);
+                const name = provinceDisplayName(provId);
                 return (
                   <div key={`sea-${provId}`} className="rounded-lg border p-2 bg-cyan-950/30 border-cyan-900/40">
                     <div className="flex justify-between items-center mb-1.5">
@@ -227,7 +226,7 @@ export function AttackOrderModal({ save, targetId, targetName, onQueue, onClose 
               {airOnlyBases.map(provId => {
                 const avail = availableAt(provId);
                 if (avail.ucak <= 0) return null;
-                const name = PROVINCE_NAMES[provId] ?? provinceDisplayName(provId);
+                const name = provinceDisplayName(provId);
                 return (
                   <div key={`air-${provId}`} className="rounded-lg border p-2 bg-blue-950/30 border-blue-900/40">
                     <div className="flex justify-between items-center mb-1.5">

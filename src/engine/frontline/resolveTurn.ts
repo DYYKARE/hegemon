@@ -152,6 +152,26 @@ export function resolveTurn(
   const rejectedOrders: MilitaryOrder[] = [];
   const events: string[] = [];
 
+  // Birlikleri SAHİBİNİN güvenli bölgesine döndürür. Kaynak il bu tur düşman
+  // eline geçtiyse dost komşuya çekilirler; hiç sığınak yoksa dağılırlar.
+  // (Önceki davranış birlikleri sahipliğe bakmadan kaynağa ekliyordu: hem
+  // kaynağı hem hedefi aynı turda düşen ordu, DÜŞMAN garnizonuna katılıyordu.)
+  const returnUnits = (ownerId: string, fromId: string, units: Army) => {
+    if (!hasUnits(units)) return;
+    const from = draft[fromId];
+    if (from && from.ownerId === ownerId) {
+      from.army = addArmy(from.army, units);
+      return;
+    }
+    const refuge = from?.neighbors.find(n => draft[n]?.ownerId === ownerId);
+    if (refuge) {
+      draft[refuge].army = addArmy(draft[refuge].army, units);
+      events.push(`${from?.name ?? fromId} düştüğü için dönen birlikler ${draft[refuge].name} bölgesine çekildi`);
+    } else {
+      events.push(`${from?.name ?? fromId} düştü — dönen birlikler dağıldı (sığınak yok)`);
+    }
+  };
+
   // ============ FAZ 1 — Emir doğrulama ve birlik kilitleme ============
   // Geçerli emrin birlikleri kaynaktan hemen düşülür; savunma hesabına
   // COMMITTED_DEFENSE_FACTOR üzerinden sınırlı katkı verirler (aşağıda).
@@ -410,10 +430,10 @@ export function resolveTurn(
     } else {
       // İl el değiştirmedi (attrition/repelled ya da başka taarruz ili zaten aldı):
       // savunan zayiatını yer, sağ kalan saldırganlar kaynak illerine döner
+      // (kaynak bu tur düştüyse dost komşuya — returnUnits karar verir)
       target.army = subArmy(target.army, battle.defenderLosses);
       group.commitments.forEach((c, i) => {
-        const back = survivorsByCommitment[i];
-        if (hasUnits(back)) draft[c.order.from].army = addArmy(draft[c.order.from].army, back);
+        returnUnits(c.order.issuedBy, c.order.from, survivorsByCommitment[i]);
       });
       if (battle.outcome === 'repelled') {
         events.push(`${target.name} taarruzu kırıldı (R=${battle.ratio})`);
@@ -425,11 +445,14 @@ export function resolveTurn(
 
   // ============ FAZ 3 — MOVE varışları ============
   // Hedef hâlâ dost ise birlikler varır; tur içinde düşman eline geçtiyse
-  // emir "geri döner" (kaynağa iade).
+  // emir "geri döner" (kaynağa — kaynak da düştüyse dost komşuya iade).
   for (const move of moves) {
     const dest = draft[move.order.to];
-    const arriveAt = dest.ownerId === move.order.issuedBy ? move.order.to : move.order.from;
-    draft[arriveAt].army = addArmy(draft[arriveAt].army, move.units);
+    if (dest.ownerId === move.order.issuedBy) {
+      dest.army = addArmy(dest.army, move.units);
+    } else {
+      returnUnits(move.order.issuedBy, move.order.from, move.units);
+    }
   }
 
   // ============ FAZ 4 — Side-effect'ler (nüfus + gelir) ============

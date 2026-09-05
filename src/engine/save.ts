@@ -1,41 +1,45 @@
-import { GameSave, TurnEvent, Difficulty, BattleReport } from './types';
+import { GameSave, TurnEvent, Difficulty, BattleReport, War } from './types';
 import { computeIncome, computeUpkeep, popGrowthRate, nextHappiness, clampHappiness, warWeariness, defaultAiEconomy, armyFoodRatio } from './economy';
-import { resolveWars } from './combat';
 import { advanceAiCountries } from './ai';
 import { advanceDiplomacy } from './diplomacy';
-import { NEIGHBOR_COUNTRIES, BORDER_PROVINCES, applyMapLayout } from './geography';
-import { resolveMapTurn, isLandNeighbor, splitForceToProvinces, GARRISON_SHARE_ON_WAR } from './mapWar';
+import { resolveMapTurn, splitForceToProvinces, GARRISON_SHARE_ON_WAR } from './mapWar';
 import { loadSettings, MapLayout } from './settings';
 import { buildActiveWorld, countryRegions } from './activeWorld';
-import { countryPopulation } from './countryData';
+import { countryPopulation, countryName } from './countryData';
 
-const SAVE_KEY = 'hegemon_save_v1';
+// =============================================================================
+// ÇOKLU KAYIT YUVASI (save slots) — 2026-07-17
+// Eski tek anahtar (hegemon_save_v1) ilk erişimde bir yuvaya taşınır.
+// Yapı: index (meta listesi) + yuva başına bir anahtar + aktif yuva imleci.
+// Otomatik kayıt (GameUI her state değişiminde persistSave) AKTİF yuvaya yazar;
+// "Yeni Oyun" artık kayıt SİLMEZ, yeni yuva açar.
+// =============================================================================
+const LEGACY_SAVE_KEY = 'hegemon_save_v1';
+const SLOT_INDEX_KEY = 'hegemon_slots_v1';
+const SLOT_PREFIX = 'hegemon_slot_';
+const ACTIVE_SLOT_KEY = 'hegemon_active_slot';
 
-// 2024 il nüfusları (TÜİK'e yakın değerler) — yeni oyun başlangıcı
-export const INITIAL_TURKEY_POPULATION: Record<string, number> = {
-  "tr-1": 2274106, "tr-2": 632459, "tr-3": 736912, "tr-4": 571243, "tr-5": 396865,
-  "tr-6": 5822802, "tr-7": 2688004, "tr-8": 174023, "tr-9": 1148164, "tr-10": 1250610,
-  "tr-11": 228334, "tr-12": 283228, "tr-13": 359747, "tr-14": 320014, "tr-15": 273716,
-  "tr-16": 3194720, "tr-17": 559383, "tr-18": 196531, "tr-19": 526282, "tr-20": 1051511,
-  "tr-21": 1804880, "tr-22": 414714, "tr-23": 591497, "tr-24": 238622, "tr-25": 769085,
-  "tr-26": 906617, "tr-27": 2154051, "tr-28": 450154, "tr-29": 77800, "tr-30": 284923,
-  "tr-31": 1686043, "tr-32": 445325, "tr-33": 1916432, "tr-34": 15655924, "tr-35": 4462056,
-  "tr-36": 274829, "tr-37": 378115, "tr-38": 1441523, "tr-39": 369347, "tr-40": 242944,
-  "tr-41": 2079072, "tr-42": 2296347, "tr-43": 580701, "tr-44": 806156, "tr-45": 1468279,
-  "tr-46": 1171298, "tr-47": 854716, "tr-48": 1021141, "tr-49": 399202, "tr-50": 308393,
-  "tr-51": 365415, "tr-52": 763190, "tr-53": 345097, "tr-54": 1080080, "tr-55": 1368087,
-  "tr-56": 331411, "tr-57": 218408, "tr-58": 634924, "tr-59": 1142451, "tr-60": 615711,
-  "tr-61": 818023, "tr-62": 83645, "tr-63": 2143020, "tr-64": 391156, "tr-65": 1141015,
-  "tr-66": 423886, "tr-67": 589688, "tr-68": 429069, "tr-69": 84366, "tr-70": 249464,
-  "tr-71": 278335, "tr-72": 642874, "tr-73": 537762, "tr-74": 200788, "tr-75": 98335,
-  "tr-76": 204100, "tr-77": 299313, "tr-78": 248014, "tr-79": 145826, "tr-80": 542157,
-  "tr-81": 401011
-};
+export interface SaveSlotMeta {
+  id: string;
+  countryId: string;
+  turn: number;
+  difficulty: Difficulty;
+  mapLayout: string;
+  playerColor: string;
+  conquests: number;
+  updatedAt: number; // Date.now()
+}
 
-export function newGame(difficulty: Difficulty = 'orta', playerCountryId = '792'): GameSave {
+// Oyuncunun varsayılan toprak rengi (yeni oyunda seçmezse / eski kayıtta yoksa)
+export const DEFAULT_PLAYER_COLOR = '#1d4ed8';
+
+export function newGame(
+  difficulty: Difficulty = 'orta',
+  playerCountryId = '792',
+  playerColor: string = DEFAULT_PLAYER_COLOR,
+): GameSave {
   // Yeni oyun menüde seçilen harita düzeniyle başlar; dünya bu düzende kurulur
   const mapLayout = loadSettings().mapLayout;
-  applyMapLayout(mapLayout);
   buildActiveWorld(mapLayout);
 
   // Oyuncu ülkesinin bölgelerine nüfus dağıt (ülke toplamı / bölge sayısı, hafif varyans)
@@ -52,6 +56,7 @@ export function newGame(difficulty: Difficulty = 'orta', playerCountryId = '792'
   return {
     mapLayout,
     playerCountryId,
+    playerColor,
     version: 1,
     difficulty,
     turn: 1,
@@ -91,21 +96,22 @@ function migrateSave(parsed: any): GameSave {
         ?? defaultAiEconomy(id, parsed.difficulty ?? 'orta');
     }
   }
-  // Fethedilen ülke adları: eski kayıtlar için komşu listesinden geriye dönük doldur
+  // Fethedilen ülke adları: eski kayıtlar için ülke tablosundan geriye dönük doldur
   const conqueredNames = { ...(parsed.conqueredNames ?? {}) };
   for (const id of parsed.conqueredCountryIds ?? []) {
     if (!conqueredNames[id]) {
-      conqueredNames[id] = NEIGHBOR_COUNTRIES.find(c => c.id === id)?.name ?? id;
+      conqueredNames[id] = countryName(id);
     }
   }
-  // Kayıt kendi düzenini saklar; dünya bu düzende kurulur (App.handleContinue çağırır).
+  // Kayıt kendi düzenini saklar; dünya bu düzende kurulur (parseSlot çağırır —
+  // savaş göçü countryRegions'a baktığından dünya GÖÇTEN ÖNCE kurulmuş olmalı).
   const mapLayout: MapLayout = parsed.mapLayout === 'detayli' || parsed.mapLayout === 'gercek'
     ? parsed.mapLayout : 'basit';
-  applyMapLayout(mapLayout);
   const base: GameSave = {
     ...parsed,
     mapLayout,
     playerCountryId: parsed.playerCountryId ?? '792',
+    playerColor: parsed.playerColor ?? DEFAULT_PLAYER_COLOR,
     conqueredEconomies,
     conqueredNames,
     difficulty: parsed.difficulty ?? 'orta',
@@ -124,25 +130,26 @@ function migrateSave(parsed: any): GameSave {
     enemyProvinceStrength: parsed.enemyProvinceStrength ?? {},
     capturedEnemyProvinces: parsed.capturedEnemyProvinces ?? [],
     pendingOrders: parsed.pendingOrders ?? [],
-    wars: (parsed.wars ?? []).map((w: any) => {
-      // Eski "deployedUnits" filtresi kaldırıldı; birlikler zaten illerde durduğundan
-      // kayıp olmaz — oyuncu yeni sistemde orduyu cepheye tekrar gönderir.
-      const { deployedUnits: _legacy, ...rest } = w;
-      const migrated = { initiator: 'player', ...rest };
-      if (migrated.initiator === 'player' && !migrated.front) {
-        migrated.front = { asker: 0, tank: 0, ucak: 0 };
-      }
-      return migrated;
-    }),
+    wars: (parsed.wars ?? []).map((w: any) => ({ initiator: 'player', ...w })),
   };
-  return migrateLandWarsToMap(base);
+  return migratePoolWarsToMap(base);
 }
 
-// Eski havuz tabanlı KARA savaşlarını harita (graph) modeline çevirir:
-// il_il eyalet güçleri garnizona, topyekun direnç eyaletlere bölünür;
-// cephe ordusu sınır iline döner. Deniz aşırı savaşlar havuz modelinde kalır.
-function migrateLandWarsToMap(save: GameSave): GameSave {
-  const needsMigration = save.wars.some(w => w.warType !== 'harita' && isLandNeighbor(w.countryId));
+// Eski havuz tabanlı savaşları harita (graph) modeline çevirir. Havuz modeli
+// tamamen söküldü (2026-07-17): il_il eyalet güçleri garnizona, topyekun direnç
+// eyaletlere bölünür; cephe ordusu oyuncunun işgalsiz bir bölgesine döner ve
+// legacy alanlar (front/provinces/activeProvinceId/deployedUnits) atılır.
+// Legacy alanlar artık War tipinde yok — okumalar `any` üzerinden yapılır.
+function migratePoolWarsToMap(save: GameSave): GameSave {
+  const legacy = (w: War) => w as unknown as {
+    warType?: string;
+    front?: { asker: number; tank: number; ucak: number };
+    provinces?: { id: string; strength: number; isConquered: boolean }[];
+  };
+  const needsMigration = save.wars.some(w => {
+    const l = legacy(w);
+    return l.warType !== 'harita' || l.front || l.provinces;
+  });
   if (!needsMigration) return save;
 
   const enemyProvinceStrength = { ...save.enemyProvinceStrength };
@@ -150,14 +157,16 @@ function migrateLandWarsToMap(save: GameSave): GameSave {
   const provinceUnits = { ...save.provinceUnits };
   const aiMilitary = { ...save.aiMilitary };
 
-  const wars = save.wars.map(w => {
-    if (w.warType === 'harita' || !isLandNeighbor(w.countryId)) return w;
+  // Cephe ordusunun döneceği yurt bölgesi: işgalsiz ilk öz bölge
+  const homeId = countryRegions(save.playerCountryId).find(id => !save.occupiedProvinces[id])
+    ?? Object.keys(save.provinceInvestments)[0];
 
-    // Cephe ordusu sınır iline döner
-    const front = w.front;
-    if (front && (front.asker > 0 || front.tank > 0 || front.ucak > 0)) {
-      const homeId = (BORDER_PROVINCES[w.countryId] ?? []).find(id => !save.occupiedProvinces[id])
-        ?? (BORDER_PROVINCES[w.countryId] ?? [])[0] ?? 'tr-6';
+  const wars: War[] = save.wars.map(w => {
+    const l = legacy(w);
+
+    // Cephe ordusu (havuz modelinin gezici ordusu) yurda döner
+    const front = l.front;
+    if (homeId && front && (front.asker > 0 || front.tank > 0 || front.ucak > 0)) {
       const home = { ...(provinceUnits[homeId] || {}) };
       if (front.asker > 0) home.asker = (home.asker || 0) + front.asker;
       if (front.tank > 0) home.tank = (home.tank || 0) + front.tank;
@@ -165,60 +174,166 @@ function migrateLandWarsToMap(save: GameSave): GameSave {
       provinceUnits[homeId] = home;
     }
 
-    if (w.warType === 'il_il' && w.provinces) {
-      for (const p of w.provinces) {
+    if (l.warType === 'il_il' && l.provinces) {
+      for (const p of l.provinces) {
         if (p.isConquered) {
           if (!capturedEnemyProvinces.includes(p.id)) capturedEnemyProvinces.push(p.id);
         } else {
           enemyProvinceStrength[p.id] = p.strength;
         }
       }
-    } else {
+    } else if (l.warType !== 'harita') {
       splitForceToProvinces(enemyProvinceStrength, w.countryId, w.enemyStrength * GARRISON_SHARE_ON_WAR);
       aiMilitary[w.countryId] = Math.round(w.enemyStrength * (1 - GARRISON_SHARE_ON_WAR));
     }
 
+    // Yalnız güncel War alanları kalır; legacy alanlar burada düşer
     return {
-      ...w,
-      warType: 'harita' as const,
-      provinces: undefined,
-      activeProvinceId: undefined,
-      front: { asker: 0, tank: 0, ucak: 0 },
+      countryId: w.countryId,
+      countryName: w.countryName,
+      enemyStrength: w.enemyStrength,
+      enemyMaxStrength: w.enemyMaxStrength,
+      startedTurn: w.startedTurn,
+      lastPlayerLoss: w.lastPlayerLoss ?? 0,
+      lastEnemyLoss: w.lastEnemyLoss ?? 0,
+      initiator: w.initiator,
+      warType: 'harita',
     };
   });
 
   return { ...save, wars, enemyProvinceStrength, capturedEnemyProvinces, provinceUnits, aiMilitary };
 }
 
-export function loadSave(): GameSave | null {
+// --- Yuva altyapısı ---
+
+function readIndex(): SaveSlotMeta[] {
   try {
-    const raw = localStorage.getItem(SAVE_KEY);
+    const raw = localStorage.getItem(SLOT_INDEX_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeIndex(index: SaveSlotMeta[]): void {
+  try {
+    localStorage.setItem(SLOT_INDEX_KEY, JSON.stringify(index));
+  } catch { /* depolama dolu — oyun kayıtsız sürer */ }
+}
+
+function slotMetaOf(id: string, save: GameSave): SaveSlotMeta {
+  return {
+    id,
+    countryId: save.playerCountryId,
+    turn: save.turn,
+    difficulty: save.difficulty,
+    mapLayout: save.mapLayout,
+    playerColor: save.playerColor,
+    conquests: save.conqueredCountryIds.length,
+    updatedAt: Date.now(),
+  };
+}
+
+// Eski tek anahtarlı kayıt varsa bir yuvaya taşı (bir kez; ilk erişimde çalışır)
+function migrateLegacySlot(): void {
+  try {
+    const raw = localStorage.getItem(LEGACY_SAVE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    localStorage.removeItem(LEGACY_SAVE_KEY);
+    if (parsed?.version !== 1 || !parsed.playerCountryId) return; // uyumsuz eski kayıt
+    const id = `s${Date.now()}`;
+    localStorage.setItem(SLOT_PREFIX + id, raw);
+    writeIndex([slotMetaOf(id, parsed as GameSave), ...readIndex()]);
+    localStorage.setItem(ACTIVE_SLOT_KEY, id);
+  } catch { /* bozuk eski kayıt: yok say */ }
+}
+
+/** Tüm yuvaların metası — en son oynanmış önce. */
+export function listSaveSlots(): SaveSlotMeta[] {
+  migrateLegacySlot();
+  return readIndex().sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function parseSlot(id: string): GameSave | null {
+  try {
+    const raw = localStorage.getItem(SLOT_PREFIX + id);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed?.version !== 1) return null;
-    // Generic dünya modeli öncesi kayıtlar (playerCountryId yok, tr- id'li) uyumsuz —
-    // temiz başlanır. buildActiveWorld çağıran taraf (App.handleContinue) düzeni kurar.
-    if (!parsed.playerCountryId) return null;
+    if (parsed?.version !== 1 || !parsed.playerCountryId) return null;
+    // Dünya, kaydın düzeninde GÖÇTEN ÖNCE kurulur: havuz→harita savaş göçü
+    // countryRegions'a bakar — dünya yokken boş dönüp göçü sessizce atlıyordu.
+    const mapLayout: MapLayout = parsed.mapLayout === 'detayli' || parsed.mapLayout === 'gercek'
+      ? parsed.mapLayout : 'basit';
+    buildActiveWorld(mapLayout);
     return migrateSave(parsed);
   } catch {
     return null;
   }
 }
 
+/** Yuvayı yükler ve AKTİF yapar (otomatik kayıt artık ona yazar). */
+export function loadSlot(id: string): GameSave | null {
+  migrateLegacySlot();
+  const save = parseSlot(id);
+  if (save) {
+    try { localStorage.setItem(ACTIVE_SLOT_KEY, id); } catch { /* imleçsiz sürer */ }
+  }
+  return save;
+}
+
+/** En son oynanan yuvayı yükler ("Devam Et"). */
+export function loadSave(): GameSave | null {
+  const latest = listSaveSlots()[0];
+  return latest ? loadSlot(latest.id) : null;
+}
+
+/** Yuvayı ve metasını kalıcı siler. */
+export function deleteSlot(id: string): void {
+  localStorage.removeItem(SLOT_PREFIX + id);
+  writeIndex(readIndex().filter(m => m.id !== id));
+  if (localStorage.getItem(ACTIVE_SLOT_KEY) === id) localStorage.removeItem(ACTIVE_SLOT_KEY);
+}
+
+/**
+ * Yeni oyunu YENİ bir yuvada başlatır — mevcut kayıtlara dokunmaz.
+ * İlk kaydı hemen yazar ki oyuncu tek tur oynamadan çıksa da yuva listede olsun.
+ */
+export function startNewSlot(save: GameSave): void {
+  migrateLegacySlot();
+  const id = `s${Date.now()}`;
+  try { localStorage.setItem(ACTIVE_SLOT_KEY, id); } catch { /* imleçsiz sürer */ }
+  persistSave(save);
+}
+
+/** Aktif yuvaya yazar (otomatik kayıt her tur burayı çağırır) ve metayı tazeler. */
 export function persistSave(save: GameSave): void {
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify(save));
+    let id = localStorage.getItem(ACTIVE_SLOT_KEY);
+    if (!id) { // imleç kaybolduysa (edge) yeni yuva aç — ilerleme asla ezilmez
+      id = `s${Date.now()}`;
+      localStorage.setItem(ACTIVE_SLOT_KEY, id);
+    }
+    localStorage.setItem(SLOT_PREFIX + id, JSON.stringify(save));
+    const index = readIndex().filter(m => m.id !== id);
+    index.unshift(slotMetaOf(id, save));
+    writeIndex(index);
   } catch {
     // depolama dolu/erişilemez — oyun kayıtsız devam eder
   }
 }
 
 export function hasSave(): boolean {
-  return loadSave() !== null;
+  return listSaveSlots().length > 0;
 }
 
-export function clearSave(): void {
-  localStorage.removeItem(SAVE_KEY);
+/** TÜM kayıtları siler (yalnız testler ve tam sıfırlama için). */
+export function clearAllSaves(): void {
+  for (const m of readIndex()) localStorage.removeItem(SLOT_PREFIX + m.id);
+  localStorage.removeItem(SLOT_INDEX_KEY);
+  localStorage.removeItem(ACTIVE_SLOT_KEY);
+  localStorage.removeItem(LEGACY_SAVE_KEY);
 }
 
 // Firar: bakım ödenemeyince mobil birliklerin bir kısmı dağılır (yapılar kalır)
@@ -271,7 +386,6 @@ export function advanceTurn(save: GameSave): { save: GameSave; events: TurnEvent
   // 4. Bakım ödemesi: hazine yetmezse birlikler firar eder (tur başına en çok %10)
   let money = save.money + income;
   let provinceUnits = save.provinceUnits;
-  let wars = save.wars;
   if (money >= upkeep.total) {
     money -= upkeep.total;
   } else if (upkeep.total > 0) {
@@ -280,14 +394,6 @@ export function advanceTurn(save: GameSave): { save: GameSave; events: TurnEvent
     const lossFrac = Math.min(0.10, shortfall * 0.10);
     if (lossFrac > 0) {
       provinceUnits = desertUnits(provinceUnits, lossFrac);
-      wars = wars.map(w => w.front ? {
-        ...w,
-        front: {
-          asker: Math.floor(w.front.asker * (1 - lossFrac)),
-          tank: Math.floor(w.front.tank * (1 - lossFrac)),
-          ucak: Math.floor(w.front.ucak * (1 - lossFrac)),
-        },
-      } : w);
       events.push({ type: 'battle', message: 'Hazine ordunun bakımını karşılayamıyor — birlikler firar ediyor!' });
     }
   }
@@ -297,7 +403,6 @@ export function advanceTurn(save: GameSave): { save: GameSave; events: TurnEvent
     turn: save.turn + 1,
     money,
     provinceUnits,
-    wars,
     provinceInvestments,
     happiness: newHappiness,
   };
@@ -305,13 +410,10 @@ export function advanceTurn(save: GameSave): { save: GameSave; events: TurnEvent
   // 5. AI ülkeleri güçlendir
   const aiResult = advanceAiCountries(afterEconomy);
 
-  // 6. Deniz aşırı (havuz) savaşları çöz
-  const warResult = resolveWars(aiResult.save);
+  // 6. Savaşlar (tek model: harita): emir kuyruğu + graph muharebeleri TEK SEFERDE çözülür
+  const mapResult = resolveMapTurn(aiResult.save);
 
-  // 7. Harita savaşları: emir kuyruğu + graph muharebeleri TEK SEFERDE çözülür
-  const mapResult = resolveMapTurn(warResult.save);
-
-  // 8. Diplomasi: ilişki drifti, fetih korkusu (bu tur fethedilenler sayılır),
+  // 7. Diplomasi: ilişki drifti, fetih korkusu (bu tur fethedilenler sayılır),
   // pakt bitişi, ittifak dağılması, eşik uyarıları
   const newConquests = mapResult.save.conqueredCountryIds.length - save.conqueredCountryIds.length;
   const dipResult = advanceDiplomacy(mapResult.save, newConquests);
@@ -320,7 +422,7 @@ export function advanceTurn(save: GameSave): { save: GameSave; events: TurnEvent
     // Hazine tur sonunda tam sayıya yuvarlanır: gelir hesapları kesirli dolar
     // üretebiliyor, küsurat kayıtta turlar boyu birikiyordu (kozmetik ama kirli).
     save: { ...dipResult.save, money: Math.round(dipResult.save.money) },
-    events: [...events, ...aiResult.events, ...warResult.events, ...mapResult.events, ...dipResult.events],
-    reports: [...warResult.reports, ...mapResult.reports],
+    events: [...events, ...aiResult.events, ...mapResult.events, ...dipResult.events],
+    reports: mapResult.reports,
   };
 }

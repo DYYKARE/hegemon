@@ -1,0 +1,39 @@
+# Playwright E2E paketi (e2e/ — POM mimarisi, 4 görünüm: masaüstü/tablet/mobil yatay+dikey).
+# Ne zaman koşar:
+#   - her push (main) ve her PR'da  → regresyon kapısı
+#   - HER GÜN 06:00 UTC (09:00 TR)  → günlük sağlık koşumu (bağımlılık çürümesi,
+#     tarayıcı güncellemesi gibi "kod değişmeden bozulan" durumları yakalar)
+# Başarısız koşumda HTML raporu artifact olarak 14 gün saklanır:
+# Actions → koşum → Artifacts → playwright-report.
+name: Playwright-E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '0 6 * * *'   # her gün 06:00 UTC
+  workflow_dispatch:        # elle tetikleme (Actions sekmesinden)
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Playwright tarayıcısını kur
+        run: npx playwright install --with-deps chromium
+      - name: E2E paketi (4 görünüm)
+        run: npx playwright test
+      - name: HTML raporu yükle (başarısızlıkta inceleme için)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14

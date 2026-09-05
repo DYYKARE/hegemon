@@ -2,20 +2,21 @@ import React, { useState, useEffect, useRef } from 'react';
 import { WorldMap } from './WorldMap';
 import { Stepper } from './Stepper';
 import { BattleReportModal } from './BattleReportModal';
-import { Swords, Users, MapPin, Plane, Shield, Anchor, Rocket, Castle, Tractor, Factory, Play, Pause, FastForward, SkipForward, Menu, Flag, Save, LogOut, X, Check, DoorOpen, Power, Heart, Coins, Percent } from 'lucide-react';
+import { Swords, Users, MapPin, Plane, Shield, Anchor, Rocket, Castle, Tractor, Factory, Play, Pause, FastForward, SkipForward, Menu, Flag, Save, LogOut, X, Check, DoorOpen, Power, Heart, Coins, Percent, BookOpen, Minus, Plus } from 'lucide-react';
 import { GameSave, TurnEvent, War, BattleReport } from '../engine/types';
 import { persistSave, advanceTurn } from '../engine/save';
-import { UNIT_COSTS, UNIT_LABELS, INVESTMENT_RATES, POP_COST_PER_PERSON, computeIncome, computeUpkeep, totalPopulation, totalPopulationGrowth, warWeariness, formatMoney, formatCount, happinessMultiplier, happinessEmoji, getAiEconomy, conqueredCountryIncome, investInConquered, CONQUERED_DEV_RATE, disbandUnits, SALVAGE_RATE, effectiveInvestment, armyFoodRatio, armyFoodSupply, armyFoodDemand, totalAskerCount, INVESTMENT_SOFT_CAP } from '../engine/economy';
-import { computeDefensePower, computeTotalAttackPower, startWar, peaceTerms, signPeace, deployToFront, withdrawFront, frontAttackPower, frontHasUnits, isOverseas, expeditionCapacity, frontWeight, EMPTY_FRONT } from '../engine/combat';
+import { UNIT_COSTS, UNIT_LABELS, INVESTMENT_RATES, POP_COST_PER_PERSON, computeIncome, computeUpkeep, totalPopulation, totalPopulationGrowth, warWeariness, formatMoney, formatCount, happinessMultiplier, happinessEmoji, getAiEconomy, conqueredCountryIncome, conqueredCountryTotalIncome, conqueredRegionalIncome, investInConquered, CONQUERED_DEV_RATE, disbandUnits, SALVAGE_RATE, effectiveInvestment, armyFoodRatio, armyFoodSupply, armyFoodDemand, totalAskerCount, INVESTMENT_SOFT_CAP, POP_TAX_PER_CAPITA, TRADE_INCOME_SHARE, popGrowthRate, POP_GROWTH_RATE, FARM_POP_BONUS_MAX } from '../engine/economy';
+import { computeDefensePower, computeTotalAttackPower, computeAAPower, startWar, peaceTerms, signPeace, LAND_ATTACK, LAND_DEFENSE, BOMBARDMENT_POWER } from '../engine/combat';
 import { DIFFICULTY_LABELS, getCountryStats } from '../engine/countries';
 import { getAiMilitary, getAiWarOpponent, aiMilitaryGrowthPerTurn, attackRiskInfo } from '../engine/ai';
-import { diplomacyStatus, sendGift, signPact, formAlliance, signTradeDeal, sendUltimatum, giftRelationGain, giftHint, pactActive, PACT_DURATION } from '../engine/diplomacy';
-import { isLandNeighbor, canOrderAttack, queueAttackOrders, cancelOrder, countryOfProvince, warProvinceProgress, provinceDisplayName, terrainOf, militiaDefense, getProvinceNeighbors, isPlayerRegion, foreignNeighborCountries, borderRegionsWith, allBorderRegions, canLaunchSeaInvasion, SHIP_CAPACITY, queueTransferOrder, committedUnits, buildBorderDefense, victoryAchieved } from '../engine/mapWar';
+import { diplomacyStatus, sendGift, signPact, formAlliance, signTradeDeal, sendUltimatum, giftRelationGain, giftHint, giftRemainingThisTurn, pactActive, PACT_DURATION, TRADE_MIN_RELATION, PACT_MIN_RELATION, ALLIANCE_MIN_RELATION, GIFT_RELATION_PER_INCOME } from '../engine/diplomacy';
+import { canOrderAttack, queueAttackOrders, cancelOrder, countryOfProvince, warProvinceProgress, provinceDisplayName, terrainOf, militiaDefense, getProvinceNeighbors, isPlayerRegion, foreignNeighborCountries, borderRegionsWith, allBorderRegions, canLaunchSeaInvasion, SHIP_CAPACITY, queueTransferOrder, committedUnits, buildBorderDefense, victoryAchieved, evaluateAnnexOffer, applyAnnexOffer, retreatFromWar, ANNEX_ACCEPT_THRESHOLD, RETREAT_HAPPINESS_COST, RETREAT_TRUCE_DURATION, RETREAT_TRUCE_MIN_WAR_TURNS } from '../engine/mapWar';
 import { isCoastalRegion, countryRegions } from '../engine/activeWorld';
 import { countryName, countryLandNeighborList } from '../engine/mapWar';
 import { regionName } from '../engine/activeWorld';
 import { Army } from '../engine/frontline/types';
 import { AttackOrderModal } from './AttackOrderModal';
+import { HowToPlay } from './HowToPlay';
 import { exitApplication } from '../platform';
 
 interface GameUIProps {
@@ -47,6 +48,80 @@ function AnimatedNumber({ value, format }: { value: number; format: (v: number) 
     return () => cancelAnimationFrame(raf);
   }, [value]);
   return <>{format(Math.round(disp))}</>;
+}
+
+// Basılı tutunca hızlanarak tekrar eden buton davranışı (Stepper ile aynı his):
+// dokun = 1 adım · 350ms bekle · 110ms'de bir tekrar · 10 tik sonra 4×.
+// onClick korunur (klavye erişilebilirliği + otomasyon); pointer oturumunun
+// bıraktığı sondaki click yutulur ki adım çift işlemesin. Buton basılıyken
+// devre dışı kalırsa pointerup butona düşmez — window'daki tek seferlik
+// pointerup dinleyicisi interval sızıntısını her koşulda keser.
+function useHoldRepeat(fn: () => void) {
+  const fnRef = useRef(fn);
+  useEffect(() => { fnRef.current = fn; });
+  const timer = useRef<number | undefined>(undefined);
+  const inter = useRef<number | undefined>(undefined);
+  const ticks = useRef(0);
+  const viaPointer = useRef(false);
+
+  const stop = () => {
+    window.clearTimeout(timer.current);
+    window.clearInterval(inter.current);
+    inter.current = undefined;
+    ticks.current = 0;
+  };
+  useEffect(() => stop, []); // unmount temizliği
+
+  return {
+    onPointerDown: () => {
+      viaPointer.current = true;
+      fnRef.current();
+      window.addEventListener('pointerup', stop, { once: true });
+      timer.current = window.setTimeout(() => {
+        inter.current = window.setInterval(() => {
+          ticks.current += 1;
+          const mult = ticks.current > 10 ? 4 : 1;
+          for (let i = 0; i < mult; i++) fnRef.current();
+        }, 110);
+      }, 350);
+    },
+    onPointerUp: stop,
+    onPointerLeave: stop,
+    onPointerCancel: stop,
+    onContextMenu: (e: React.MouseEvent) => e.preventDefault(),
+    onClick: () => {
+      if (viaPointer.current) { viaPointer.current = false; return; }
+      fnRef.current();
+    },
+  };
+}
+
+// Üst bar detay popover'larının ortak satırı: sol etiket (+ opsiyonel alt açıklama),
+// sağda hizalı monospace değer
+function DetailRow({ label, value, color = 'text-slate-200', sub }: {
+  label: React.ReactNode; value: React.ReactNode; color?: string; sub?: string;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-0.5">
+      <span className="text-[11px] text-slate-400 min-w-0">
+        {label}
+        {sub && <span className="block text-[9px] text-slate-600">{sub}</span>}
+      </span>
+      <span className={`text-[11px] font-mono whitespace-nowrap ${color}`}>{value}</span>
+    </div>
+  );
+}
+
+// Popover içi bölüm başlığı (GELİRLER / GİDERLER gibi)
+function DetailSection({ title, color = 'text-slate-500', children }: {
+  title: React.ReactNode; color?: string; children: React.ReactNode;
+}) {
+  return (
+    <div className="mt-3 first:mt-0">
+      <div className={`text-[10px] font-bold uppercase tracking-wide mb-1 ${color}`}>{title}</div>
+      {children}
+    </div>
+  );
 }
 
 // Komşunun savaş açma riski — motorla AYNI formül (ai.attackRiskInfo):
@@ -97,38 +172,79 @@ function DiplomacyPanel({ save, setSave, countryId, armyPower }: {
   const st = diplomacyStatus(save, countryId, armyPower);
   const income = getAiEconomy(save, countryId).income;
   const [giftAmount, setGiftAmount] = useState(0);
+  // Ültimatom iki dokunuşlu onay (geri alınamaz: ilişki −40 kalıcı yara)
+  const [ultConfirm, setUltConfirm] = useState(false);
+  const ultTimer = useRef<number | undefined>(undefined);
   const giftGain = giftAmount > 0 ? giftRelationGain(save, countryId, giftAmount) : 0;
   const giftAffordable = giftAmount > 0 && giftAmount <= save.money && giftGain >= 1;
   const toneText = st.tone === 'dost' ? 'text-green-400' : st.tone === 'dusman' ? 'text-red-400' : 'text-slate-300';
   const barColor = st.tone === 'dost' ? 'bg-green-500' : st.tone === 'dusman' ? 'bg-red-500' : 'bg-slate-400';
   const apply = (fn: (s: GameSave) => GameSave | null) => setSave(prev => fn(prev) ?? prev);
 
+  // Engeli EYLEME çevrilebilir bilgiye dönüştür: oyuncu "neden olmuyor"la
+  // birlikte "ne yaparsam olur"u ve mevcut durumunu görsün.
+  const theirMil = getAiMilitary(save, countryId);
+  const blockText = (reason?: string): string => {
+    if (!reason) return '';
+    if (reason.includes('ilişki') && reason.includes('olmalı')) {
+      return `${reason} — şu an ${st.relation > 0 ? '+' : ''}${st.relation}. 🎁 Hediyeyle ısıtabilirsin`;
+    }
+    if (reason === 'hazine yetersiz') return `hazine yetersiz — kasada ${formatMoney(save.money)} var`;
+    if (reason.includes('güç üstünlüğü')) {
+      return `${reason} — senin gücün ${formatCount(armyPower)}, onunki ${formatCount(theirMil)}`;
+    }
+    return reason;
+  };
+  // Ticaretin kendini ödeme süresi: "pahalı mı" sorusunun tek bakışlık cevabı
+  const tradeAmorti = st.tradeIncome > 0 ? Math.ceil(st.actions.trade.cost / st.tradeIncome) : 0;
+
   const actionRows: {
     icon: string; label: string; sub: string; cost: string;
-    ok: boolean; reason?: string; active?: boolean; activeText?: string; run: () => void;
+    ok: boolean; reason?: string; active?: boolean; activeText?: string;
+    minRelation?: number; run: () => void;
   }[] = [
     {
-      icon: '📦', label: 'Ticaret Anlaşması', sub: `her tur +${formatMoney(st.tradeIncome)} gelir`,
+      icon: '📦', label: 'Ticaret Anlaşması',
+      sub: `her tur +${formatMoney(st.tradeIncome)} gelir · kendini ~${tradeAmorti} turda öder, sonrası kâr`,
       cost: formatMoney(st.actions.trade.cost), ok: st.actions.trade.ok, reason: st.actions.trade.reason,
       active: st.trade, activeText: `aktif · +${formatMoney(st.tradeIncome)}/tur`,
+      minRelation: TRADE_MIN_RELATION,
       run: () => apply(s => signTradeDeal(s, countryId)),
     },
     {
-      icon: '🕊️', label: `Saldırmazlık Paktı`, sub: `${PACT_DURATION} tur — iki taraf da saldıramaz`,
+      icon: '🕊️', label: `Saldırmazlık Paktı`,
+      sub: `${PACT_DURATION} tur boyunca İKİ TARAF da saldıramaz — bu sınırı güvene alıp ordunu başka cepheye taşırsın`,
       cost: formatMoney(st.actions.pact.cost), ok: st.actions.pact.ok, reason: st.actions.pact.reason,
       active: st.pactTurnsLeft > 0, activeText: `aktif · ${st.pactTurnsLeft} tur kaldı`,
+      minRelation: PACT_MIN_RELATION,
       run: () => apply(s => signPact(s, countryId)),
     },
     {
-      icon: '🤝', label: 'İttifak', sub: 'saldırmaz + sana saldırana cephe açar',
+      icon: '🤝', label: 'İttifak',
+      sub: 'kalıcı: asla saldırmaz + SANA savaş açana o da cephe açar — en güçlü caydırıcılık',
       cost: formatMoney(st.actions.alliance.cost), ok: st.actions.alliance.ok, reason: st.actions.alliance.reason,
       active: st.ally, activeText: 'müttefik',
+      minRelation: ALLIANCE_MIN_RELATION,
       run: () => apply(s => formAlliance(s, countryId)),
     },
     {
-      icon: '💰', label: 'Ültimatom', sub: `haraç al · ilişki büyük yara alır`,
+      icon: '💰',
+      label: ultConfirm ? 'Ültimatom — Emin misin?' : 'Ültimatom',
+      sub: ultConfirm
+        ? 'ikinci dokunuş haracı keser · ilişki −40 KALICI yara'
+        : `gözdağıyla tek seferlik ${formatMoney(st.actions.ultimatum.cost)} haraç — savaşsız para, ama ilişki −40 kalıcı düşer (düşmanlaşır)`,
       cost: `+${formatMoney(st.actions.ultimatum.cost)}`, ok: st.actions.ultimatum.ok, reason: st.actions.ultimatum.reason,
-      run: () => apply(s => sendUltimatum(s, countryId, armyPower)),
+      run: () => {
+        if (!ultConfirm) {
+          setUltConfirm(true);
+          window.clearTimeout(ultTimer.current);
+          ultTimer.current = window.setTimeout(() => setUltConfirm(false), 3000);
+          return;
+        }
+        window.clearTimeout(ultTimer.current);
+        setUltConfirm(false);
+        apply(s => sendUltimatum(s, countryId, armyPower));
+      },
     },
   ];
 
@@ -174,30 +290,71 @@ function DiplomacyPanel({ save, setSave, countryId, armyPower }: {
       <span className="text-[9px] text-slate-500">{giftHint(save, countryId)}</span>
 
       {/* Anlaşmalar / eylemler */}
-      {actionRows.map(row => row.active ? (
-        <div key={row.label} className="flex items-center justify-between py-1 px-1.5 bg-blue-900/30 border border-blue-800/50 rounded text-[10px] text-blue-300">
-          <span>{row.icon} {row.label}</span>
-          <span className="font-mono">{row.activeText}</span>
-        </div>
-      ) : (
-        <button
-          key={row.label}
-          onClick={row.ok ? row.run : undefined}
-          disabled={!row.ok}
-          title={row.reason}
-          className={`flex flex-col items-stretch py-1 px-1.5 rounded text-[10px] border transition-colors text-left ${
-            row.ok
-              ? 'bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-slate-700'
-              : 'bg-slate-800/40 text-slate-500 border-slate-800 cursor-not-allowed'
-          }`}
-        >
-          <span className="flex justify-between">
-            <span>{row.icon} {row.label}</span>
-            <span className={`font-mono ${row.ok ? 'text-amber-300' : 'text-slate-500'}`}>{row.cost}</span>
-          </span>
-          <span className="text-[9px] text-slate-500">{row.ok ? row.sub : `⛔ ${row.reason}`}</span>
-        </button>
-      ))}
+      {actionRows.map(row => {
+        if (row.active) {
+          return (
+            <div key={row.label} className="flex items-center justify-between py-1 px-1.5 bg-blue-900/30 border border-blue-800/50 rounded text-[10px] text-blue-300">
+              <span>{row.icon} {row.label}</span>
+              <span className="font-mono">{row.activeText}</span>
+            </div>
+          );
+        }
+        if (row.ok) {
+          return (
+            <button
+              key={row.label}
+              onClick={row.run}
+              className="flex flex-col items-stretch py-1 px-1.5 rounded text-[10px] border text-left bg-slate-800/80 hover:bg-slate-700 text-slate-200 border-slate-700 press-fx"
+            >
+              <span className="flex justify-between">
+                <span>{row.icon} {row.label}</span>
+                <span className="font-mono text-amber-300">{row.cost}</span>
+              </span>
+              <span className="text-[9px] text-slate-500">{row.sub}</span>
+            </button>
+          );
+        }
+        // KİLİTLİ satır: fayda yine görünür; engel + "nasıl açılır" birlikte.
+        // (div — disabled button içindeki kısayol dokunuş alamazdı)
+        const relBlocked = row.minRelation !== undefined && st.relation < row.minRelation
+          && !!row.reason?.includes('ilişki');
+        const kalanTavan = giftRemainingThisTurn(save, countryId);
+        const gap = relBlocked ? row.minRelation! - st.relation : 0;
+        const hedefKazanc = Math.min(gap, kalanTavan);
+        const gerekenTutar = hedefKazanc > 0
+          ? Math.ceil(hedefKazanc * income / GIFT_RELATION_PER_INCOME)
+          : 0;
+        return (
+          <div
+            key={row.label}
+            title={row.reason}
+            className="flex flex-col items-stretch py-1 px-1.5 rounded text-[10px] border text-left bg-slate-800/40 text-slate-500 border-slate-800"
+          >
+            <span className="flex justify-between">
+              <span>{row.icon} {row.label}</span>
+              <span className="font-mono text-slate-500">{row.cost}</span>
+            </span>
+            <span className="text-[9px] text-slate-500">{row.sub}</span>
+            <span className="text-[9px] text-amber-400/90 mt-0.5">⛔ {blockText(row.reason)}</span>
+            {relBlocked && (
+              hedefKazanc > 0 ? (
+                <button
+                  onClick={() => setGiftAmount(gerekenTutar)}
+                  title={`Hediye kutusuna ${formatMoney(gerekenTutar)} yazar (+${hedefKazanc} ilişki) — göndermek için 🎁 Hediye'ye bas`}
+                  className="mt-1 self-start px-2 py-1 rounded text-[9px] font-medium border border-green-900/60 bg-green-950/50 hover:bg-green-900/60 text-green-300 hit-target-sm press-fx"
+                >
+                  🎁 Gereken hediyeyi hazırla — {formatMoney(gerekenTutar)} (+{hedefKazanc}
+                  {hedefKazanc < gap ? ` · kalan ${gap - hedefKazanc} gelecek tura` : ` → eşik tamam`})
+                </button>
+              ) : (
+                <span className="text-[9px] text-slate-500 mt-0.5">
+                  🎁 bu turun hediye tavanı doldu — kalan {gap} puan için gelecek tur tekrar dene
+                </span>
+              )
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -220,27 +377,49 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
   const [showArmyMenu, setShowArmyMenu] = useState(false);
   const [showBorderMenu, setShowBorderMenu] = useState(false);
   const [borderDraft, setBorderDraft] = useState<Draft>({ kara_savunma: '', hava_savunma: '' });
-  const [showTransferMenu, setShowTransferMenu] = useState(false);
-  const [transferMode, setTransferMode] = useState<{ active: boolean, sourceId: string | null, sourceName: string | null }>({ active: false, sourceId: null, sourceName: null });
-  const [transferDraft, setTransferDraft] = useState<Draft>(EMPTY_UNIT_DRAFT);
+  // Ordu Çağır: seçili ile DİĞER illerden mobil birlik toplama paneli
+  // (eski iki-tıklamalı "transfer"in yerini aldı — hedef zaten seçili il,
+  // kaynaklar listeden işaretlenir, tür filtreleri neyin çağrılacağını belirler)
+  const [showGatherMenu, setShowGatherMenu] = useState(false);
+  // Tür filtreleri — varsayılan İŞARETLİ: kara = asker+tank, hava = uçak
+  const [gatherFilters, setGatherFilters] = useState({ kara: true, hava: true });
+  // Çağrı yapılacak kaynak iller (il id → dahil mi)
+  const [selectedSourceProvinces, setSelectedSourceProvinces] = useState<Record<string, boolean>>({});
+  // Hassas seçim: il başına ELLE miktar — tanımlıysa o ilden "tümü" yerine
+  // yalnız bu kadar çağrılır (stepper'larla ayarlanır, serbest mevcutla sınırlı)
+  const [gatherCustom, setGatherCustom] = useState<Record<string, Army>>({});
+  // Hangi il satırının miktar ayar stepper'ları açık
+  const [gatherExpanded, setGatherExpanded] = useState<Record<string, boolean>>({});
   const [armyDraft, setArmyDraft] = useState<Draft>(EMPTY_UNIT_DRAFT);
   const [investmentDraft, setInvestmentDraft] = useState<Draft>({ tarim: '', sanayi: '', nufus: '' });
   const [activeFilters, setActiveFilters] = useState<string[]>(['asker', 'tank', 'ucak', 'liman', 'hava_savunma', 'kara_savunma', 'tarim', 'sanayi', 'nufus']);
   const [autoPlaySpeed, setAutoPlaySpeed] = useState<number | null>(null);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
+  // Nasıl Oynanır rehberi: oyuna ilk girişte otomatik açılır, menüden tekrar açılabilir
+  const [showGuide, setShowGuide] = useState(!initialSave.guideSeen);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [justSaved, setJustSaved] = useState(false);
   const [dismissedWarKeys, setDismissedWarKeys] = useState<string[]>([]);
   const [dismissedBannerKeys, setDismissedBannerKeys] = useState<string[]>([]);
   const [showTaxPanel, setShowTaxPanel] = useState(false);
+  // Vergi ayar hassasiyeti (yüzde puan) — slider ve +/− butonları bu adımı kullanır
+  const [taxStep] = useState(0.5);
+  // Üst bar detay popover'ı: aynı anda tek panel açık olabilir (null = hepsi kapalı)
+  const [activeStatPanel, setActiveStatPanel] = useState<'hazine' | 'nufus' | 'ordu' | null>(null);
+  const toggleStatPanel = (panel: 'hazine' | 'nufus' | 'ordu') =>
+    setActiveStatPanel(prev => (prev === panel ? null : panel));
+  useEffect(() => {
+    if (!activeStatPanel) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setActiveStatPanel(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeStatPanel]);
   const [showWarConfirm, setShowWarConfirm] = useState(false);
   const [preModalAutoPlaySpeed, setPreModalAutoPlaySpeed] = useState<number | null>(null);
   // Taarruz emri modalı: hedef il (işgal altındaki TR ili veya düşman eyaleti)
   const [attackTarget, setAttackTarget] = useState<{ id: string; name: string } | null>(null);
   const [victoryDismissed, setVictoryDismissed] = useState(false);
   const [defeatDismissed, setDefeatDismissed] = useState(false);
-  const [showDeployMenu, setShowDeployMenu] = useState<string | null>(null); // countryId of war to deploy to
-  const [deployDraft, setDeployDraft] = useState<Record<string, { asker: number; tank: number; ucak: number }>>({});
   const [showDisbandMenu, setShowDisbandMenu] = useState(false);
   const [disbandDraft, setDisbandDraft] = useState<Draft>(EMPTY_UNIT_DRAFT);
   const [devInvestDraft, setDevInvestDraft] = useState<Draft>({ tutar: '' }); // fethedilen toprağa kalkınma yatırımı
@@ -261,9 +440,24 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
     setSave(prev => {
       const result = advanceTurn(prev);
       pendingReportsRef.current = result.reports;
+      // Tur özeti şeridi: "sessiz" turlarda bile oyuncuya nabız verir
+      // (10 olaysız tur üst üste gelebiliyor — 2026-07-15 pacing testi)
+      pendingSummaryRef.current = {
+        turn: result.save.turn,
+        money: result.save.money - prev.money,
+        happy: (result.save.happiness ?? 70) - (prev.happiness ?? 70),
+        pop: totalPopulation(result.save) - totalPopulation(prev),
+      };
       return result.save;
     });
   };
+  const pendingSummaryRef = useRef<{ turn: number; money: number; happy: number; pop: number } | null>(null);
+  const [turnSummary, setTurnSummary] = useState<{ turn: number; money: number; happy: number; pop: number } | null>(null);
+  useEffect(() => {
+    if (!pendingSummaryRef.current) return;
+    setTurnSummary(pendingSummaryRef.current);
+    pendingSummaryRef.current = null;
+  }, [save]);
 
   useEffect(() => {
     const reports = pendingReportsRef.current;
@@ -333,9 +527,9 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
       }
     }
 
-    // Yeni harita savaşı (oyuncu ilanı): oynanış ipucu göster
+    // Yeni savaş (oyuncu ilanı): oynanış ipucu göster
     for (const war of save.wars) {
-      if (war.initiator === 'player' && war.warType === 'harita'
+      if (war.initiator === 'player'
         && !prev.wars.some(w => w.countryId === war.countryId)) {
         newEvents.push({ type: 'battle', message: `⚔️ ${war.countryName} ile savaş başladı — haritada düşman illerine dokunup Taarruz Emri ver. Emirler tur sonunda işlenir.` });
       }
@@ -374,6 +568,24 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
       }
     }
 
+    // AI barış talebi (simetri): süren harita savaşında düşmanın ilhak-kabul
+    // eşiği BU TUR aşıldıysa düşman kendisi barış ister — karar matrisi iki
+    // taraf için de aynı gerçeği okur, oyuncu teklifin geçeceğini haber alır.
+    for (const war of save.wars) {
+      if (!prev.wars.some(w => w.countryId === war.countryId)) continue;
+      const power = computeTotalAttackPower(save, happinessMultiplier(save.happiness ?? 70));
+      const now = evaluateAnnexOffer(save, war.countryId, power);
+      const before = evaluateAnnexOffer(prev, war.countryId, power);
+      const readyNow = !!now && now.accepted && now.capturedCount > 0;
+      const readyBefore = !!before && before.accepted && before.capturedCount > 0;
+      if (readyNow && !readyBefore) {
+        newEvents.push({
+          type: 'peace',
+          message: `🕊️ ${war.countryName} barış istiyor — ele geçirdiğin ${now!.capturedCount} bölgeyi ilhak etmeni kabul etmeye hazır (savaş kartı → İlhakla Bitir).`,
+        });
+      }
+    }
+
     if (newEvents.length > 0) {
       setEvents(e => [...e, ...newEvents].slice(-4));
     }
@@ -385,6 +597,17 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
       return () => clearInterval(interval);
     }
   }, [autoPlaySpeed]);
+
+  // Kesinti güvenliği: uygulama arka plana alınınca (gelen arama, sekme/uygulama
+  // değişimi) otomatik oynatma DURUR — oyuncu dönünce turlar habersiz akmış olmaz.
+  // Kayıt zaten her turda yazıldığından veri kaybı riski ayrıca yoktur.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) setAutoPlaySpeed(null);
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
 
   // Olay bildirimleri birkaç saniye sonra kaybolsun
   useEffect(() => {
@@ -445,16 +668,6 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
     if (save.money + income < upkeep.total) stillRelevantKeys.add('upkeep');
     if (save.wars.some(w => w.initiator === 'player') && armyPower <= 0) stillRelevantKeys.add('noarmy');
     if (underInvasion && defensePower <= 0) stillRelevantKeys.add('nodefense');
-    for (const w of save.wars) {
-      // Cephe/piyade uyarıları yalnız havuz (deniz aşırı) savaşları için geçerli —
-      // harita savaşında ordu illerde durur, taarruz emirle verilir.
-      if (w.warType === 'harita') continue;
-      if (w.initiator === 'player' && save.turn > w.startedTurn && w.enemyStrength > 0 && !frontHasUnits(w.front)) {
-        stillRelevantKeys.add(`emptyfront-${w.countryId}-${w.startedTurn}`);
-      }
-      const waitingForInfantry = w.initiator === 'player' && save.turn > w.startedTurn && w.enemyStrength <= 0;
-      if (waitingForInfantry) stillRelevantKeys.add(`waitinfantry-${w.countryId}-${w.startedTurn}`);
-    }
     setDismissedBannerKeys(prev => {
       const next = prev.filter(k => stillRelevantKeys.has(k));
       return next.length === prev.length ? prev : next;
@@ -482,34 +695,34 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
     }
   }, [save, selectedTarget]);
 
+  // --- Play-test köprüsü (yalnız DEV) ---
+  // Otomatik test koşucusu (src/test/playtest.ts) state okuyup yazabilsin ve
+  // panel açtırabilsin diye dar bir yüzey. import.meta.env.DEV koşulu sayesinde
+  // prod build'e girmez; window'a yalnız geliştirmede takılır.
+  const testBridgeRef = useRef<{ save: GameSave; select: (id: string, name: string, isProvince?: boolean) => void } | null>(null);
+  useEffect(() => {
+    testBridgeRef.current = { save, select: handleTargetSelect };
+  });
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as Record<string, unknown>).__hegemonTest = {
+      getSave: () => testBridgeRef.current!.save,
+      setSave,
+      selectTarget: (id: string, name: string, isProvince?: boolean) =>
+        testBridgeRef.current!.select(id, name, isProvince),
+      // E2E zafer testi kara komşularını sabit listelemek yerine motordan alır
+      // (zafer koşulu tam bu listeye bakar — mapWar.victoryAchieved)
+      getLandNeighbors: () =>
+        countryLandNeighborList(testBridgeRef.current!.save.playerCountryId),
+    };
+    return () => { delete (window as unknown as Record<string, unknown>).__hegemonTest; };
+  }, []);
+
   const handleTargetSelect = (id: string, name: string, isProvince?: boolean) => {
-    if (transferMode.active && !showTransferMenu) {
-      // Transfer hedefi: TR ili VEYA ele geçirilen düşman bölgesi (bizim toprağımız sayılır)
-      const ownTerritory = isProvince || save.capturedEnemyProvinces.includes(id);
-      if (ownTerritory && id !== transferMode.sourceId) {
-        setSelectedTarget({id, name, isProvince});
-        // Aynı rotada bekleyen emir varsa DÜZENLEME olarak açılır: taslak emrin
-        // tamamıyla başlar — Gönder emri değiştirdiğinden oyuncu modalda hep
-        // emrin YENİ halini görür ("ekledim sandım, küçülmüş" tuzağı kapanır).
-        const existing = (save.pendingOrders ?? []).find(o =>
-          o.type === 'MOVE' && o.from === transferMode.sourceId && o.to === id);
-        setTransferDraft(existing
-          ? { ...EMPTY_UNIT_DRAFT, asker: existing.units.asker, tank: existing.units.tank, ucak: existing.units.ucak }
-          : EMPTY_UNIT_DRAFT);
-        setShowTransferMenu(true);
-      }
-      return;
-    }
-
-    if (transferMode.active && showTransferMenu) {
-      setTransferMode({ active: false, sourceId: null, sourceName: null });
-      setShowTransferMenu(false);
-    }
-
     setSelectedTarget({id, name, isProvince});
     setShowInvestmentMenu(false);
     setShowArmyMenu(false);
-    setShowTransferMenu(false);
+    setShowGatherMenu(false);
     setShowDisbandMenu(false);
     setShowBorderMenu(false);
     setArmyDraft(EMPTY_UNIT_DRAFT);
@@ -652,21 +865,302 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
     setShowArmyMenu(false);
   };
 
-  // Transfer artık anlık ışınlama değil: MOVE emri kuyruklanır, tur sonunda varır.
-  // Yolda geçen tur birlikler kilitlidir (kaynağı %25 verimle savunur) — bedeli budur.
-  const handleTransferArmy = () => {
-    if (!selectedTarget?.isProvince || !transferMode.sourceId) return;
-    const amounts = parseDraft(transferDraft);
-    setSave(prev => queueTransferOrder(prev, transferMode.sourceId!, selectedTarget.id, {
-      asker: amounts.asker || 0,
-      tank: amounts.tank || 0,
-      ucak: amounts.ucak || 0,
-    }));
+  // --- Ordu Çağır ---
+  // Seçili İLE, işaretli kaynak illerden filtreye uyan TÜM serbest mobil birlikler
+  // için MOVE emirleri kuyruklanır. Anlık ışınlama değil: tur sonunda varır,
+  // yolda geçen tur birlikler kilitlidir (kaynağı %25 verimle savunur).
 
-    setTransferMode({ active: false, sourceId: null, sourceName: null });
-    setShowTransferMenu(false);
-    setSelectedTarget(null);
-    setTransferDraft(EMPTY_UNIT_DRAFT);
+  // Bir kaynağın SERBEST mobil birlikleri: başka emre bağlı olanlar düşülür;
+  // aynı hedefe bekleyen MOVE emri düzenleme sayılır (Çağır onu değiştirir),
+  // o emirdeki birlikler serbest kabul edilir.
+  const gatherFreeUnits = (srcId: string, targetId: string): Army => {
+    const units = save.provinceUnits[srcId] || {};
+    const lockedAll = committedUnits(save, srcId);
+    const sameRoute = (save.pendingOrders ?? []).find(o =>
+      o.type === 'MOVE' && o.from === srcId && o.to === targetId);
+    const free = (k: 'asker' | 'tank' | 'ucak') =>
+      Math.max(0, (units[k] || 0) - Math.max(0, (lockedAll[k] || 0) - (sameRoute?.units[k] || 0)));
+    return { asker: free('asker'), tank: free('tank'), ucak: free('ucak') };
+  };
+
+  // Tür filtreleri: işareti kalkan grup çağrıya ve toplama HİÇ girmez
+  const applyGatherFilters = (a: Army): Army => ({
+    asker: gatherFilters.kara ? a.asker : 0,
+    tank: gatherFilters.kara ? a.tank : 0,
+    ucak: gatherFilters.hava ? a.ucak : 0,
+  });
+
+  // Bir ilin çağrıya katkısı — TEK doğru kaynak (liste, toplam ve emirler
+  // aynı hesabı okur): elle miktar girildiyse o (serbest mevcutla ve tür
+  // filtreleriyle sınırlı), girilmediyse filtreye uyan TÜM serbest birlikler.
+  const gatherContribution = (srcId: string, targetId: string): Army => {
+    const free = gatherFreeUnits(srcId, targetId);
+    const custom = gatherCustom[srcId];
+    if (custom) {
+      return {
+        asker: gatherFilters.kara ? Math.min(custom.asker, free.asker) : 0,
+        tank: gatherFilters.kara ? Math.min(custom.tank, free.tank) : 0,
+        ucak: gatherFilters.hava ? Math.min(custom.ucak, free.ucak) : 0,
+      };
+    }
+    return applyGatherFilters(free);
+  };
+
+  const handleGatherArmy = () => {
+    if (!selectedTarget) return;
+    const targetId = selectedTarget.id;
+    const calls = Object.entries(selectedSourceProvinces)
+      .filter(([, on]) => on)
+      .map(([srcId]) => ({ srcId, units: gatherContribution(srcId, targetId) }))
+      .filter(c => c.units.asker + c.units.tank + c.units.ucak > 0);
+    if (calls.length === 0) return;
+    setSave(prev => calls.reduce((s, c) => queueTransferOrder(s, c.srcId, targetId, c.units), prev));
+    setShowGatherMenu(false);
+  };
+
+  // Ordu Listeleme Paneli: tür filtreleri (üstte) + kaynak il listesi +
+  // "Tüm Birlikler" ve filtrelerle senkron dinamik toplam (altta)
+  const renderGatherMenu = () => {
+    if (!selectedTarget) return null;
+    const targetId = selectedTarget.id;
+    const sources = Object.keys(save.provinceUnits)
+      .filter(id => id !== targetId && isPlayerRegion(save, id))
+      .map(id => {
+        const free = gatherFreeUnits(id, targetId);
+        const filtered = applyGatherFilters(free);
+        const callable = gatherContribution(id, targetId); // elle miktar varsa onu okur
+        return {
+          id, name: provinceDisplayName(id), free, callable,
+          freeTotal: free.asker + free.tank + free.ucak,
+          filteredTotal: filtered.asker + filtered.tank + filtered.ucak,
+          callableTotal: callable.asker + callable.tank + callable.ucak,
+        };
+      })
+      .filter(s => s.freeTotal > 0) // mobil birliği olmayan iller listelenmez
+      .sort((a, b) => b.callableTotal - a.callableTotal || b.freeTotal - a.freeTotal);
+
+    const enabled = sources.filter(s => s.filteredTotal > 0);
+    const selected = enabled.filter(s => selectedSourceProvinces[s.id]);
+    const total = selected.reduce((t, s) => ({
+      asker: t.asker + s.callable.asker,
+      tank: t.tank + s.callable.tank,
+      ucak: t.ucak + s.callable.ucak,
+    }), { asker: 0, tank: 0, ucak: 0 });
+    const totalCount = total.asker + total.tank + total.ucak;
+    const totalPower = (total.asker * LAND_ATTACK.asker + total.tank * LAND_ATTACK.tank
+      + total.ucak * BOMBARDMENT_POWER) * hMult;
+    const allSelected = enabled.length > 0 && selected.length === enabled.length;
+    const filterLabel = [gatherFilters.kara && 'Kara', gatherFilters.hava && 'Hava']
+      .filter(Boolean).join('/') || 'tür seçilmedi';
+
+    const toggleAll = (on: boolean) => {
+      const next: Record<string, boolean> = {};
+      for (const s of enabled) next[s.id] = on;
+      setSelectedSourceProvinces(next);
+    };
+
+    // Tür sayacı: filtre dışıysa soluk + üstü çizili ("çağrılamaz" işareti)
+    const UnitCount = ({ on, label, value }: { on: boolean; label: string; value: number }) => (
+      <span
+        className={on ? 'text-slate-300' : 'text-slate-600 line-through'}
+        title={on ? undefined : 'Filtre dışı — çağrılmaz'}
+      >{label}{formatCount(value)}</span>
+    );
+
+    return (
+      <div className="flex flex-col gap-1.5 w-full min-h-0">
+        <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider shrink-0">
+          ORDU ÇAĞIR &rarr; {selectedTarget.name}
+        </span>
+        <span className="text-[9px] text-purple-300/80 shrink-0">
+          🔁 Tur sonunda varır — yoldaki birlikler kaynağı %25 verimle savunur. Savunma yapıları ve gemiler sabittir, taşınamaz.
+        </span>
+
+        {/* Tür filtreleri: liste ve toplam anlık güncellenir */}
+        <div className="flex flex-wrap gap-x-3 gap-y-1 shrink-0 bg-slate-950/50 border border-slate-800 rounded px-2 py-1.5">
+          <label className="flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="accent-purple-500 cursor-pointer"
+              checked={gatherFilters.kara}
+              onChange={e => setGatherFilters(f => ({ ...f, kara: e.target.checked }))}
+            />
+            🪖 Kara unsurları <span className="text-slate-500">(asker · tank)</span>
+          </label>
+          <label className="flex items-center gap-1.5 text-[10px] text-slate-300 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="accent-purple-500 cursor-pointer"
+              checked={gatherFilters.hava}
+              onChange={e => setGatherFilters(f => ({ ...f, hava: e.target.checked }))}
+            />
+            ✈️ Hava unsurları <span className="text-slate-500">(uçak)</span>
+          </label>
+        </div>
+
+        {/* Kaynak il listesi */}
+        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col -mr-1 pr-1">
+          {sources.length === 0 && (
+            <span className="text-[10px] text-slate-500 py-2">Çağrılabilir birliği olan başka il yok.</span>
+          )}
+          {sources.map(s => {
+            const disabled = s.filteredTotal === 0;
+            const custom = gatherCustom[s.id];
+            const expanded = !!gatherExpanded[s.id];
+            return (
+              <div key={s.id} className={`rounded ${disabled ? 'opacity-40' : 'hover:bg-slate-800/40'}`}>
+                <div className="flex items-center gap-2 py-1 px-1">
+                  <label className={`flex items-center gap-2 flex-1 min-w-0 ${disabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}>
+                    <input
+                      type="checkbox"
+                      className="accent-purple-500 shrink-0 cursor-pointer"
+                      disabled={disabled}
+                      checked={!disabled && !!selectedSourceProvinces[s.id]}
+                      onChange={e => setSelectedSourceProvinces(p => ({ ...p, [s.id]: e.target.checked }))}
+                    />
+                    <span className="text-xs text-slate-200 truncate">{s.name}</span>
+                  </label>
+                  <span className="text-[9px] font-mono flex gap-1.5 shrink-0">
+                    {custom ? (
+                      <span className="text-purple-300" title="Elle ayarlandı — ✎ ile değiştir">
+                        seçilen: {s.callable.asker > 0 && `🪖${formatCount(s.callable.asker)} `}
+                        {s.callable.tank > 0 && `🛡️${formatCount(s.callable.tank)} `}
+                        {s.callable.ucak > 0 && `✈️${formatCount(s.callable.ucak)}`}
+                        {s.callableTotal === 0 && '—'}
+                      </span>
+                    ) : (
+                      <>
+                        {s.free.asker > 0 && <UnitCount on={gatherFilters.kara} label="🪖" value={s.free.asker} />}
+                        {s.free.tank > 0 && <UnitCount on={gatherFilters.kara} label="🛡️" value={s.free.tank} />}
+                        {s.free.ucak > 0 && <UnitCount on={gatherFilters.hava} label="✈️" value={s.free.ucak} />}
+                      </>
+                    )}
+                    {disabled && <span className="text-amber-500/80">filtre dışı</span>}
+                  </span>
+                  {/* Hassas seçim: bu ilden hangi birimden KAÇ tane çağrılacağı */}
+                  <button
+                    onClick={() => {
+                      if (disabled) return;
+                      if (!expanded) {
+                        if (!custom) setGatherCustom(p => ({ ...p, [s.id]: { ...s.callable } }));
+                        setSelectedSourceProvinces(p => ({ ...p, [s.id]: true }));
+                      }
+                      setGatherExpanded(p => ({ ...p, [s.id]: !expanded }));
+                    }}
+                    disabled={disabled}
+                    title="Bu ilden kaç birim çağrılacağını elle ayarla"
+                    className={`shrink-0 px-2.5 py-1 rounded text-[11px] border hit-target-sm press-fx ${
+                      expanded || custom
+                        ? 'bg-purple-900/50 text-purple-200 border-purple-700/60'
+                        : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                    }`}
+                  >
+                    ✎
+                  </button>
+                </div>
+                {expanded && !disabled && (
+                  <div className="pl-6 pr-1 pb-1.5 flex flex-col gap-1 border-l border-purple-900/40 ml-2.5">
+                    {([['asker', '🪖 Asker', gatherFilters.kara], ['tank', '🛡️ Tank', gatherFilters.kara], ['ucak', '✈️ Uçak', gatherFilters.hava]] as const)
+                      .filter(([k]) => s.free[k] > 0)
+                      .map(([k, lbl, on]) => (
+                        <div key={k} className="flex items-center justify-between gap-2">
+                          <span className={`text-[10px] ${on ? 'text-slate-400' : 'text-slate-600 line-through'}`}>
+                            {lbl} <span className="text-slate-600">· serbest {formatCount(s.free[k])}</span>
+                          </span>
+                          <Stepper
+                            value={on ? Math.min(custom?.[k] ?? s.callable[k], s.free[k]) : 0}
+                            step={Math.min(UI_STEPS[k], Math.max(1, s.free[k]))}
+                            format={formatCount}
+                            onStep={delta => setGatherCustom(p => {
+                              const cur = p[s.id] ?? { ...s.callable };
+                              const next = Math.max(0, Math.min(s.free[k], (cur[k] ?? 0) + delta));
+                              return { ...p, [s.id]: { ...cur, [k]: next } };
+                            })}
+                          />
+                        </div>
+                      ))}
+                    <button
+                      onClick={() => {
+                        setGatherCustom(p => { const n = { ...p }; delete n[s.id]; return n; });
+                        setGatherExpanded(p => ({ ...p, [s.id]: false }));
+                      }}
+                      className="self-end text-[10px] text-slate-400 hover:text-slate-200 underline px-2 py-1 hit-target-sm press-fx"
+                    >
+                      elle seçimi bırak — tümünü çağır
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Tüm Birlikler + filtrelere senkron dinamik toplam */}
+        <div className="border-t border-slate-700/60 pt-1.5 shrink-0">
+          <label className={`flex items-center gap-2 py-0.5 select-none ${enabled.length === 0 ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}>
+            <input
+              type="checkbox"
+              className="accent-purple-500 cursor-pointer"
+              checked={allSelected}
+              disabled={enabled.length === 0}
+              onChange={e => toggleAll(e.target.checked)}
+            />
+            <span className="text-xs font-medium text-slate-200 flex-1">Tüm Birlikler</span>
+            <span className="text-[9px] text-slate-500">{selected.length}/{enabled.length} il</span>
+          </label>
+          <div className="flex items-baseline justify-between text-[10px] font-mono">
+            <span className="text-slate-400">Toplam Seçilen ({filterLabel}):</span>
+            <span className="text-purple-300">
+              {totalCount > 0
+                ? <>🪖{formatCount(total.asker)} · 🛡️{formatCount(total.tank)} · ✈️{formatCount(total.ucak)}</>
+                : '—'}
+            </span>
+          </div>
+          <div className="flex items-baseline justify-between text-[10px] font-mono">
+            <span className="text-slate-400">Saldırı gücü (mutluluk dahil):</span>
+            <span className="text-red-400">{totalCount > 0 ? formatCount(totalPower) : '—'}</span>
+          </div>
+        </div>
+
+        <div className="flex gap-2 mt-1 shrink-0">
+          <button
+            onClick={() => setShowGatherMenu(false)}
+            className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium border border-slate-600 transition-colors press-fx"
+          >
+            İptal
+          </button>
+          <button
+            onClick={handleGatherArmy}
+            disabled={totalCount === 0}
+            className={`flex-1 py-1 rounded text-xs font-medium border press-fx ${
+              totalCount > 0
+                ? 'bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 border-purple-900/50'
+                : 'bg-slate-800/50 text-slate-500 border-slate-700/50 cursor-not-allowed'
+            }`}
+          >
+            Orduyu Çağır{selected.length > 0 ? ` (${selected.length} il)` : ''}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Geri alınamaz eylemler için İKİ DOKUNUŞLU onay: ilk dokunuş butonu
+  // "Emin misin?"e çevirir, 3 sn içindeki ikinci dokunuş çalıştırır. Modal'dan
+  // hafif, mobil dostu. (Çocuk-persona testi: onaysız savaş ilanı + onaysız
+  // barış = iki yanlış tıkla −$720M ve 40 tur ateşkes — 2026-07-15.)
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const confirmTimer = useRef<number | undefined>(undefined);
+  const confirmTap = (key: string, run: () => void) => {
+    if (confirmKey === key) {
+      window.clearTimeout(confirmTimer.current);
+      setConfirmKey(null);
+      run();
+      return;
+    }
+    setConfirmKey(key);
+    window.clearTimeout(confirmTimer.current);
+    confirmTimer.current = window.setTimeout(() => setConfirmKey(null), 3000);
   };
 
   const handleDeclareWar = () => {
@@ -679,12 +1173,6 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
     const { id, name } = selectedTarget;
     setSave(prev => startWar(prev, id, name));
     setShowWarConfirm(false);
-    // Deniz aşırı sefer havuz modelinde: ilandan sonra cepheye ordu gönderilir.
-    // Kara savaşı harita modelinde: oyuncu düşman illerine taarruz emri verir.
-    if (!isLandNeighbor(id)) {
-      setDeployDraft({});
-      setShowDeployMenu(id);
-    }
   };
 
   // Taarruz emrini kuyruğa yaz — state hemen değişmez, tur sonunda işlenir
@@ -696,19 +1184,22 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
   };
 
   const handleSignPeace = (countryId: string) => {
-    setSave(prev => signPeace(prev, countryId) ?? prev);
+    confirmTap(`peace-${countryId}`, () => setSave(prev => signPeace(prev, countryId) ?? prev));
   };
 
-  // Barış butonu etiketi ve durumu
+  // Barış butonu etiketi ve durumu (iki dokunuşlu onay: ilk dokunuşta etiket değişir)
   const peaceInfo = (war: War) => {
     const cost = peaceTerms(save, war);
     const affordable = cost <= save.money;
-    const label = cost > 0
-      ? `Barış: ${formatMoney(cost)} öde`
-      : cost < 0
-        ? `Barış: ${formatMoney(-cost)} al`
-        : 'Barış (bedelsiz)';
-    return { cost, affordable, label };
+    const confirming = confirmKey === `peace-${war.countryId}`;
+    const label = confirming
+      ? (cost > 0 ? `Emin misin? ${formatMoney(cost)} ödenecek` : 'Emin misin? Tekrar dokun')
+      : cost > 0
+        ? `Barış: ${formatMoney(cost)} öde`
+        : cost < 0
+          ? `Barış: ${formatMoney(-cost)} al`
+          : 'Barış (bedelsiz)';
+    return { cost, affordable, label, confirming };
   };
 
   // Stepper'dan gelen +/- deltalarını taslağa uygular (0 ve opsiyonel üst sınır arasında)
@@ -725,10 +1216,127 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
   const selectedConquered = selectedTarget && !selectedTarget.isProvince
     && save.conqueredCountryIds.includes(selectedTarget.id);
 
-  // Vergi oranı değiştirme
-  const handleTaxChange = (newRate: number) => {
-    setSave(prev => ({ ...prev, taxRate: Math.max(0, Math.min(1, newRate)) }));
+  // Vergi oranı değiştirme — kayan nokta hatası birikmesin diye yüzde puan
+  // üzerinden tek ondalığa yuvarlanır (%0–%100 aralığına sıkıştırılır)
+  const taxPct = Math.round((save.taxRate ?? 0.20) * 1000) / 10;
+  const handleTaxChange = (newPct: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(newPct * 10) / 10));
+    setSave(prev => ({ ...prev, taxRate: clamped / 100 }));
   };
+  // prev-tabanlı: basılı tutmadaki hızlı ardışık çağrılar doğru birikir
+  // (render'daki taxPct'e bağlansaydı aynı karedeki adımlar birbirini ezerdi)
+  const adjustTax = (deltaPct: number) => {
+    setSave(prev => {
+      const cur = Math.round((prev.taxRate ?? 0.20) * 1000) / 10;
+      const next = Math.max(0, Math.min(100, Math.round((cur + deltaPct) * 10) / 10));
+      return { ...prev, taxRate: next / 100 };
+    });
+  };
+  // Vergi −/+ butonları: basılı tutunca hızlanarak tekrar (mobil hassas ayar)
+  const taxMinusHold = useHoldRepeat(() => adjustTax(-taxStep));
+  const taxPlusHold = useHoldRepeat(() => adjustTax(taxStep));
+
+  // Yatırım menüsü — kendi illeri VE ele geçirilen (ilhak edilen) bölgelerde
+  // ortak kullanılır: ilhak edilen toprak da tarım/sanayi ile gelir üretebilsin
+  // (yatırımlar provinceInvestments'a yazılır, computeIncome zaten sayar).
+  const renderInvestmentMenu = () => selectedTarget && (
+    <div className="flex flex-col gap-1.5 w-full min-h-0">
+      <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-0.5 shrink-0">YATIRIM YAP ($)</span>
+
+      {/* Canlı durum: oyuncu tarımın gelir dışı işlevini (ordu iaşesi) burada görür */}
+      {(() => {
+        const food = armyFoodRatio(save);
+        const hungry = food < 0.999;
+        return (
+          <div className={`flex justify-between items-center px-2 py-1 rounded border shrink-0 text-[10px] ${
+            hungry ? 'bg-red-950/40 border-red-900/50 text-red-300' : 'bg-slate-950/60 border-slate-800 text-slate-400'
+          }`}>
+            <span>🌾 Ordu iaşesi</span>
+            <span className="font-mono">%{Math.round(food * 100)}{hungry ? ' — asker bakımı artıyor' : ''}</span>
+          </div>
+        );
+      })()}
+
+      <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5 -mr-1 pr-1">
+      {[
+        { id: 'tarim', label: 'Tarım', hint: 'Gelir + gıda: nüfusu büyütür, ORDUYU besler. Aç ordu pahalıya oturur.' },
+        { id: 'sanayi', label: 'Sanayi', hint: 'Salt gelir — en yüksek getirili yatırım.' },
+        { id: 'nufus', label: 'Nüfus Teşviki', hint: `${POP_COST_PER_PERSON}$ = 1 kişi · ÜLKE GENELİNE dağıtılır (her ilin asker havuzu büyür)` },
+      ].map(type => {
+        const inv = save.provinceInvestments[selectedTarget.id] || {};
+        const inputAmount = parseInt(investmentDraft[type.id]?.toString() || '0') || 0;
+        let currentLine = '';
+        let previewLine = '';
+        if (type.id === 'nufus') {
+          currentLine = `Nüfus: ${formatCount(inv.nufus || 0)}`;
+          if (inputAmount > 0) previewLine = `+${formatCount(Math.floor(inputAmount / POP_COST_PER_PERSON))} kişi · ülke geneline`;
+        } else {
+          const rate = INVESTMENT_RATES[type.id as 'tarim' | 'sanayi'];
+          // Motorla aynı doygunluk eğrisi: gösterge gerçek getiriden sapmaz
+          const raw = inv[type.id] || 0;
+          const effCur = effectiveInvestment(raw);
+          // Doluluk: bu bölgedeki kovanın ne kadarı dolu — %50'de yarı verim,
+          // yüksekse parayı BAŞKA bölgeye taşı sinyali
+          const fullness = Math.round(raw / (raw + INVESTMENT_SOFT_CAP) * 100);
+          currentLine = `Üretim: ${formatMoney(effCur * rate)}/tur · doluluk %${fullness}${fullness >= 60 ? ' ⚠️ başka bölgeye yatır' : ''}`;
+          if (inputAmount > 0) {
+            const effNext = effectiveInvestment((inv[type.id] || 0) + inputAmount);
+            previewLine = `→ ${formatMoney(effNext * rate)}/tur`;
+          }
+        }
+
+        return (
+          <div key={type.id} className="flex flex-col gap-0.5 mb-1 bg-slate-900/50 p-1.5 rounded border border-slate-800/50">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex-1">
+                <span className="text-xs text-slate-300 block">{type.label}</span>
+                <span className="text-[9px] text-slate-500">{type.hint}</span>
+              </div>
+              <Stepper
+                value={investmentDraft[type.id] || 0}
+                step={UI_STEPS[type.id]}
+                format={formatMoney}
+                onStep={stepDraft(setInvestmentDraft, type.id)}
+              />
+            </div>
+            <div className="flex justify-between items-center text-[10px] mt-0.5">
+              <span className="text-slate-500">{currentLine}</span>
+              {previewLine && <span className="text-green-400 font-mono">{previewLine}</span>}
+            </div>
+          </div>
+        );
+      })}
+      </div>
+
+      {investmentCost > 0 && (
+        <div className="flex justify-between items-center text-xs px-1 mb-1 shrink-0">
+          <span className="text-slate-400">Toplam Maliyet:</span>
+          <span className={`font-mono font-bold ${save.money >= investmentCost ? 'text-green-400' : 'text-red-400'}`}>
+            {formatMoney(investmentCost)}
+          </span>
+        </div>
+      )}
+      <div className="flex gap-2 mt-1 shrink-0">
+        <button
+          onClick={() => { setShowInvestmentMenu(false); setInvestmentDraft({ tarim: '', sanayi: '', nufus: '' }); }}
+          className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium border border-slate-600 transition-colors"
+        >
+          İptal
+        </button>
+        <button
+          onClick={handleProduceInvestment}
+          disabled={investmentCost === 0 || investmentCost > save.money}
+          className={`flex-1 py-1 rounded text-xs font-medium border transition-colors ${
+            investmentCost > 0 && investmentCost <= save.money
+              ? 'bg-green-900/40 hover:bg-green-800/60 text-green-300 border-green-900/50'
+              : 'bg-slate-800/50 text-slate-500 border-slate-700/50 cursor-not-allowed'
+          }`}
+        >
+          Yatırım Yap
+        </button>
+      </div>
+    </div>
+  );
 
   // Ordu üretim menüsü — Türk illeri ve fethedilen ülkelerde ortak kullanılır
   // --- Sınır Hattı Savunması ---
@@ -906,7 +1514,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               {isRecruit && (
                 <span className={`text-[9px] block ${armyRecruitsExceedPop ? 'text-red-400' : 'text-slate-500'}`}>
                   {selectedIsCapturedProv
-                    ? 'İşgal bölgesinde asker devşirilemez — Transfer ile getir'
+                    ? 'İşgal bölgesinde asker devşirilemez — Ordu Çağır ile getir'
                     : `${selectedTarget.isProvince ? 'İl nüfusundan alınır' : 'Yerel halktan toplanır'} (nüfus: ${formatCount(recruitPool)})`}
                 </span>
               )}
@@ -965,20 +1573,24 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
         />
       )}
 
-      {/* Top HUD */}
-      <div className="flex justify-between items-center px-4 py-2 bg-slate-900 border-b border-slate-800 z-10 shrink-0 gap-3 flex-wrap">
+      {/* Top HUD — relative + z-20: istatistik detay popover'ı bu bara çapalanır
+          ve harita üstü öğelerin (z-10 filtre barı) üzerinde kalır */}
+      <div className="relative flex justify-between items-center px-4 py-2 bg-slate-900 border-b border-slate-800 z-20 shrink-0 gap-3 flex-wrap">
         <div className="flex items-center gap-4 min-w-0">
           <div className="shrink-0">
             <h2 className="text-lg font-bold text-white leading-tight">{countryName(save.playerCountryId)}</h2>
-            <div className="text-[10px] font-mono text-slate-400">
+            {/* data-testid + data-turn: E2E paketi turu metin ayrıştırmadan okur
+                (metin biçimi değişse de test kırılmaz) */}
+            <div data-testid="turn-indicator" data-turn={save.turn} className="text-[10px] font-mono text-slate-400">
               TUR {save.turn} | {['Ocak', 'Şubat', 'Mart', 'Nisan', 'Mayıs', 'Haziran', 'Temmuz', 'Ağustos', 'Eylül', 'Ekim', 'Kasım', 'Aralık'][(save.turn - 1) % 12]} {2024 + Math.floor((save.turn - 1) / 12)}
             </div>
           </div>
 
           <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
             <button
+              data-testid="next-turn"
               onClick={() => { setAutoPlaySpeed(null); nextTurn(); }}
-              className={`px-3 py-1.5 rounded text-xs font-medium border transition-colors mr-1 ${
+              className={`px-3 py-1.5 rounded text-xs font-medium border mr-1 hit-target press-fx ${
                 save.pendingOrders.length > 0
                   ? 'bg-red-900/50 hover:bg-red-800/60 active:bg-red-800 text-red-200 border-red-800/70'
                   : 'bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 border-slate-700'
@@ -986,16 +1598,16 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             >
               Sonraki Tur{save.pendingOrders.length > 0 ? ` ⚔️${save.pendingOrders.length}` : ''}
             </button>
-            <button onClick={() => setAutoPlaySpeed(null)} className={`p-1.5 rounded transition-colors ${autoPlaySpeed === null ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Durdur">
+            <button onClick={() => setAutoPlaySpeed(null)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === null ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Durdur">
               <Pause className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(1500)} className={`p-1.5 rounded transition-colors ${autoPlaySpeed === 1500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Normal Hız (1.5s)">
+            <button onClick={() => setAutoPlaySpeed(1500)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 1500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Normal Hız (1.5s)">
               <Play className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(1000)} className={`p-1.5 rounded transition-colors ${autoPlaySpeed === 1000 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Hızlı (1s)">
+            <button onClick={() => setAutoPlaySpeed(1000)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 1000 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Hızlı (1s)">
               <FastForward className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(500)} className={`p-1.5 rounded transition-colors ${autoPlaySpeed === 500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Çok Hızlı (0.5s)">
+            <button onClick={() => setAutoPlaySpeed(500)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Çok Hızlı (0.5s)">
               <SkipForward className="w-4 h-4" />
             </button>
           </div>
@@ -1004,11 +1616,23 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
         {/* Dar ekranda (telefon dikey) satır SARAR: sabit genişlik + shrink-0 hali
             375px'te Menü butonunu ekran dışına taşırıyordu — oyuncu kaydedemiyor,
             çıkamıyor, vergi değiştiremiyordu (2026-07-14 mobil testi). */}
-        <div className="flex gap-x-3 sm:gap-x-4 gap-y-1 items-center flex-wrap justify-end min-w-0">
-          <div className="flex flex-col items-end">
+        {/* relative z-30: popover'ın clickOutside arka planının (z-20) ÜSTÜNDE kalır —
+            panel açıkken başka bir istatistiğe tıklamak panele geçiş yapar, kapatmaz */}
+        <div className="relative z-30 flex gap-x-3 sm:gap-x-4 gap-y-1 items-center flex-wrap justify-end min-w-0">
+          <button
+            onClick={() => toggleStatPanel('hazine')}
+            aria-expanded={activeStatPanel === 'hazine'}
+            title="Gelir ve gider detaylarını göster"
+            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+              activeStatPanel === 'hazine'
+                ? 'bg-slate-800/80 border-slate-700'
+                : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
+            }`}
+          >
             <span className="text-[10px] text-slate-400 font-medium">HAZİNE</span>
-            <span className="text-sm font-mono text-green-400 font-bold leading-tight"><AnimatedNumber value={save.money} format={formatMoney} /></span>
-            <span className={`text-[9px] font-mono ${netIncome >= 0 ? 'text-green-600' : 'text-red-500'}`} title={`Gelir: +${formatMoney(income)} · Ordu bakımı: −${formatMoney(upkeep.total)}${upkeep.front > 0 ? ` (cephe: ${formatMoney(upkeep.front)})` : ''}${upkeep.hunger > 0 ? ` (açlık zammı: ${formatMoney(upkeep.hunger)})` : ''}`}>
+            {/* data-money: E2E hazineyi animasyonlu metinden değil ham değerden okur */}
+            <span data-testid="treasury" data-money={save.money} className="text-sm font-mono text-green-400 font-bold leading-tight"><AnimatedNumber value={save.money} format={formatMoney} /></span>
+            <span className={`text-[9px] font-mono ${netIncome >= 0 ? 'text-green-600' : 'text-red-500'}`} title={`Gelir: +${formatMoney(income)} · Ordu bakımı: −${formatMoney(upkeep.total)}${upkeep.hunger > 0 ? ` (açlık zammı: ${formatMoney(upkeep.hunger)})` : ''}`}>
               {netIncome >= 0 ? '+' : ''}{formatMoney(netIncome)}/tur
               {upkeep.total > 0 && <span className="text-red-600/80"> · bakım {formatMoney(upkeep.total)}</span>}
               {askerTotal > 0 && (
@@ -1020,23 +1644,41 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 > · 🌾 %{Math.round(foodRatio * 100)}</span>
               )}
             </span>
-          </div>
-          <div className="flex flex-col items-end">
+          </button>
+          <button
+            onClick={() => toggleStatPanel('nufus')}
+            aria-expanded={activeStatPanel === 'nufus'}
+            title="Bölge nüfusları ve büyüme detaylarını göster"
+            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+              activeStatPanel === 'nufus'
+                ? 'bg-slate-800/80 border-slate-700'
+                : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
+            }`}
+          >
             <span className="text-[10px] text-slate-400 font-medium">NÜFUS</span>
             <span className="text-sm font-mono text-blue-400 font-bold leading-tight"><AnimatedNumber value={population} format={formatCount} /></span>
             <span className="text-[9px] font-mono text-blue-600">+{formatCount(popGrowth)}/tur</span>
-          </div>
-          <div className="flex flex-col items-end">
+          </button>
+          <button
+            onClick={() => toggleStatPanel('ordu')}
+            aria-expanded={activeStatPanel === 'ordu'}
+            title="Ordu kompozisyonu ve güç detaylarını göster"
+            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+              activeStatPanel === 'ordu'
+                ? 'bg-slate-800/80 border-slate-700'
+                : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
+            }`}
+          >
             <span className="text-[10px] text-slate-400 font-medium">SALDIRI / SAVUNMA</span>
             <span className="text-sm font-mono text-red-400 font-bold leading-tight">
               {formatCount(armyPower)} / <span className="text-green-400">{formatCount(defensePower)}</span>
             </span>
             <span className="text-[9px] font-mono text-red-600">{save.conqueredCountryIds.length} fetih</span>
-          </div>
+          </button>
           {/* Mutluluk & Vergi göstergesi */}
           <button
             onClick={() => setShowTaxPanel(!showTaxPanel)}
-            className="flex items-center gap-2 cursor-pointer hover:bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700/50 transition-all hover:opacity-100"
+            className="flex items-center gap-2 cursor-pointer hover:bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700/50 hover:opacity-100 hit-target-sm press-fx"
             title="Vergi & Mutluluk Ayarları"
           >
             <Coins className="w-5 h-5 text-yellow-500 shrink-0" />
@@ -1048,18 +1690,178 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 {happinessEmoji(save.happiness ?? 70)} {Math.round(save.happiness ?? 70)}%
               </span>
               <span className="text-[9px] font-mono text-slate-500">
-                Vergi: %{Math.round((save.taxRate ?? 0.20) * 100)} · Güç: x{hMult.toFixed(2)}
+                Vergi: %{taxPct} · Güç: x{hMult.toFixed(2)}
               </span>
             </div>
           </button>
           <button
             onClick={() => { setAutoPlaySpeed(null); setShowPauseMenu(true); }}
-            className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 text-slate-300 transition-colors"
+            className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 text-slate-300 hit-target-sm press-fx"
             title="Menü"
           >
             <Menu className="w-4 h-4" />
           </button>
         </div>
+
+        {/* İstatistik detay popover'ı: bara çapalanır, dışarı tıklayınca kapanır */}
+        {activeStatPanel && (
+          <>
+            {/* clickOutside: görünmez tam ekran arka plan, tıklanınca paneli kapatır */}
+            <div className="fixed inset-0 z-20" onClick={() => setActiveStatPanel(null)} />
+            <div className="absolute right-2 top-full mt-1 z-30 w-[min(26rem,calc(100vw-1rem))] max-h-[70dvh] overflow-y-auto bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-4">
+              {activeStatPanel === 'hazine' && (() => {
+                // computeIncome ile aynı formüller, kalem kalem (motorla senkron tut)
+                let taxIncome = 0, farmIncome = 0, industryIncome = 0;
+                for (const [provId, inv] of Object.entries(save.provinceInvestments)) {
+                  if (save.occupiedProvinces[provId]) continue;
+                  taxIncome += (inv.nufus || 0) * POP_TAX_PER_CAPITA * (save.taxRate ?? 0.20);
+                  farmIncome += effectiveInvestment(inv.tarim || 0) * INVESTMENT_RATES.tarim;
+                  industryIncome += effectiveInvestment(inv.sanayi || 0) * INVESTMENT_RATES.sanayi;
+                }
+                let conqueredIncome = 0;
+                for (const id of save.conqueredCountryIds) conqueredIncome += conqueredCountryIncome(save, id);
+                let tradeIncome = 0;
+                for (const id of save.tradeDeals ?? []) {
+                  if (save.conqueredCountryIds.includes(id)) continue;
+                  tradeIncome += getAiEconomy(save, id).income * TRADE_INCOME_SHARE;
+                }
+                return (
+                  <div>
+                    <div className="flex items-baseline justify-between mb-1">
+                      <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5"><Coins className="w-3.5 h-3.5 text-green-400" /> Hazine Detayı</h3>
+                      <span className="text-sm font-mono text-green-400 font-bold">{formatMoney(save.money)}</span>
+                    </div>
+                    <DetailSection title={<>Gelirler · <span className="text-green-400">+{formatMoney(income)}/tur</span></>} color="text-green-600">
+                      <DetailRow label={`Vergi geliri (oran: %${taxPct})`} sub="nüfus × kişi başı vergi × vergi oranı" value={`+${formatMoney(taxIncome)}`} color="text-green-400" />
+                      <DetailRow label="Tarım getirisi" sub={`yatırımın %${INVESTMENT_RATES.tarim * 100}'i / tur`} value={`+${formatMoney(farmIncome)}`} color="text-green-400" />
+                      <DetailRow label="Sanayi getirisi" sub={`yatırımın %${INVESTMENT_RATES.sanayi * 100}'i / tur`} value={`+${formatMoney(industryIncome)}`} color="text-green-400" />
+                      {conqueredIncome > 0 && (
+                        <DetailRow label={`Fethedilen ülkeler (${save.conqueredCountryIds.length})`} sub="devralınan gelir + halkın vergisi" value={`+${formatMoney(conqueredIncome)}`} color="text-green-400" />
+                      )}
+                      {tradeIncome > 0 && (
+                        <DetailRow label={`Ticaret anlaşmaları (${(save.tradeDeals ?? []).filter(id => !save.conqueredCountryIds.includes(id)).length})`} sub={`ortak gelirinin %${TRADE_INCOME_SHARE * 100}'i`} value={`+${formatMoney(tradeIncome)}`} color="text-green-400" />
+                      )}
+                    </DetailSection>
+                    <DetailSection title={<>Giderler · <span className="text-red-400">−{formatMoney(upkeep.total)}/tur</span></>} color="text-red-600">
+                      <DetailRow label="Ordu bakımı" value={`−${formatMoney(upkeep.home)}`} color="text-red-400" />
+                      {upkeep.hunger > 0 && (
+                        <DetailRow label="Açlık zammı" sub={`ordu iaşesi %${Math.round(foodRatio * 100)} — tarım yetersiz`} value={`−${formatMoney(upkeep.hunger)}`} color="text-amber-400" />
+                      )}
+                    </DetailSection>
+                    <div className="border-t border-slate-700/60 mt-3 pt-2">
+                      <DetailRow
+                        label={<span className="font-bold text-slate-300">Net akış</span>}
+                        value={`${netIncome >= 0 ? '+' : ''}${formatMoney(netIncome)}/tur`}
+                        color={`font-bold ${netIncome >= 0 ? 'text-green-400' : 'text-red-400'}`}
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {activeStatPanel === 'nufus' && (() => {
+                const rows = Object.entries(save.provinceInvestments)
+                  .map(([id, inv]) => ({
+                    id,
+                    pop: inv.nufus || 0,
+                    rate: popGrowthRate(inv),
+                    occupied: !!save.occupiedProvinces[id],
+                  }))
+                  .filter(r => r.pop > 0)
+                  .sort((a, b) => b.pop - a.pop);
+                const top = rows.slice(0, 8);
+                const rest = rows.slice(8);
+                const restPop = rest.reduce((s, r) => s + r.pop, 0);
+                const occupiedCount = rows.filter(r => r.occupied).length;
+                return (
+                  <div>
+                    <div className="flex items-baseline justify-between mb-1">
+                      <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5"><Users className="w-3.5 h-3.5 text-blue-400" /> Nüfus Detayı</h3>
+                      <span className="text-sm font-mono text-blue-400 font-bold">{formatCount(population)} · <span className="text-blue-600 text-[11px]">+{formatCount(popGrowth)}/tur</span></span>
+                    </div>
+                    <DetailSection title="Bölgelere göre dağılım" color="text-blue-600">
+                      {top.map(r => (
+                        <DetailRow
+                          key={r.id}
+                          label={<>{provinceDisplayName(r.id)}{r.occupied && <span className="text-red-400"> · işgal altında</span>}</>}
+                          value={<>{formatCount(r.pop)} <span className={r.occupied ? 'text-slate-600' : 'text-blue-600'}>{r.occupied ? '· büyüme yok' : `+%${(r.rate * 100).toFixed(2)}/tur`}</span></>}
+                          color="text-slate-200"
+                        />
+                      ))}
+                      {rest.length > 0 && (
+                        <DetailRow label={`… ve ${rest.length} bölge daha`} value={formatCount(restPop)} color="text-slate-400" />
+                      )}
+                    </DetailSection>
+                    <DetailSection title="Büyüme çarpanları" color="text-blue-600">
+                      <DetailRow label="Doğal artış" value={`+%${(POP_GROWTH_RATE * 100).toFixed(1)}/tur`} color="text-blue-400" />
+                      <DetailRow label="Tarım bonusu" sub="kişi başı $100 tarım yatırımında tam bonus" value={`+%${(FARM_POP_BONUS_MAX * 100).toFixed(1)}'e kadar`} color="text-green-400" />
+                      {occupiedCount > 0 && (
+                        <DetailRow label={`İşgal altındaki bölgeler (${occupiedCount})`} sub="vergi ve büyüme katkısı kesik" value="büyüme durdu" color="text-red-400" />
+                      )}
+                    </DetailSection>
+                  </div>
+                );
+              })()}
+
+              {activeStatPanel === 'ordu' && (() => {
+                const totals: Record<string, number> = {};
+                for (const units of Object.values(save.provinceUnits))
+                  for (const [t, c] of Object.entries(units)) totals[t] = (totals[t] || 0) + c;
+                const allAsker = totals.asker || 0;
+                const allTank = totals.tank || 0;
+                const allUcak = totals.ucak || 0;
+                const aaPower = computeAAPower(save.provinceUnits);
+                return (
+                  <div>
+                    <div className="flex items-baseline justify-between mb-1">
+                      <h3 className="text-xs font-bold text-slate-200 flex items-center gap-1.5"><Swords className="w-3.5 h-3.5 text-red-400" /> Ordu Detayı</h3>
+                      <span className="text-sm font-mono font-bold"><span className="text-red-400">{formatCount(armyPower)}</span> / <span className="text-green-400">{formatCount(defensePower)}</span></span>
+                    </div>
+                    <DetailSection title="Aktif birlikler" color="text-red-600">
+                      <DetailRow label={`${UNIT_LABELS.asker} (piyade)`} sub={`saldırı ×${LAND_ATTACK.asker} · savunma ×${LAND_DEFENSE.asker}`} value={formatCount(allAsker)} />
+                      <DetailRow label={UNIT_LABELS.tank} sub={`saldırı ×${LAND_ATTACK.tank} · savunma ×${LAND_DEFENSE.tank}`} value={formatCount(allTank)} />
+                      <DetailRow label={UNIT_LABELS.ucak} sub={`bombardıman ×${formatCount(BOMBARDMENT_POWER)}`} value={formatCount(allUcak)} />
+                      {(totals.kara_savunma || 0) > 0 && (
+                        <DetailRow label={UNIT_LABELS.kara_savunma} sub={`savunma ×${LAND_DEFENSE.kara_savunma}`} value={formatCount(totals.kara_savunma)} />
+                      )}
+                      {(totals.hava_savunma || 0) > 0 && (
+                        <DetailRow label={UNIT_LABELS.hava_savunma} sub="düşman hava akınını kırar" value={`${formatCount(totals.hava_savunma)} · AA ${formatCount(aaPower)}`} />
+                      )}
+                      {(totals.liman || 0) > 0 && (
+                        <DetailRow label={UNIT_LABELS.liman} sub="deniz aşırı sefer kapasitesi" value={formatCount(totals.liman)} />
+                      )}
+                    </DetailSection>
+                    <DetailSection title="Güç çarpanları" color="text-red-600">
+                      <DetailRow label={`Mutluluk çarpanı ${happinessEmoji(save.happiness ?? 70)}`} sub="tüm saldırı ve savunma gücünü çarpar" value={`x${hMult.toFixed(2)}`} color={hMult >= 1 ? 'text-green-400' : 'text-amber-400'} />
+                      <DetailRow label="Ordu iaşesi 🌾" sub={foodRatio < 1 ? 'tarım orduyu besleyemiyor — bakım artıyor' : 'tarım orduyu tam besliyor'} value={`%${Math.round(foodRatio * 100)}`} color={foodRatio < 1 ? 'text-amber-400' : 'text-green-400'} />
+                      {save.wars.length > 0 && (
+                        <DetailRow label={`Aktif savaşlar (${save.wars.length})`} sub={`savaş yorgunluğu −${warWeariness(save.wars).toFixed(1)} mutluluk/tur`} value="⚔️" color="text-orange-400" />
+                      )}
+                    </DetailSection>
+                    <DetailSection title={`Fetihler (${save.conqueredCountryIds.length})`} color="text-red-600">
+                      {save.conqueredCountryIds.length === 0 && (
+                        <DetailRow label="Henüz fetih yok" sub="fethedilen ülkelerin geliri ve toprağı orduya katılır" value="—" color="text-slate-500" />
+                      )}
+                      {/* TÜM fetihler listelenir; uzarsa bölüm kendi içinde kayar
+                          (özet satırıyla kırpma yok — oyuncu her fethini görmeli) */}
+                      <div className="max-h-56 overflow-y-auto -mr-1 pr-1">
+                        {save.conqueredCountryIds.map(id => (
+                          <DetailRow
+                            key={id}
+                            label={save.conqueredNames?.[id] ?? countryName(id)}
+                            sub="gelir katkısı (eyalet yatırımları dahil) — garnizon bölgede konuşlu"
+                            value={`+${formatMoney(conqueredCountryTotalIncome(save, id))}/tur`}
+                            color="text-green-400"
+                          />
+                        ))}
+                      </div>
+                    </DetailSection>
+                  </div>
+                );
+              })()}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Vergi Paneli (açılır kapanır) */}
@@ -1073,7 +1875,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 <Percent className="w-5 h-5 text-blue-400" />
               </div>
               <div>
-                <div className="text-xs font-bold text-slate-200">Vergi Oranı: %{Math.round((save.taxRate ?? 0.20) * 100)}</div>
+                <div className="text-xs font-bold text-slate-200">Vergi Oranı: %{taxPct}</div>
                 <div className="text-[9px] text-slate-500">Mutluluk hedefi = %100 − vergi · Yüksek vergi → düşük mutluluk → zayıf ordu</div>
                 {save.wars.length > 0 && (
                   <div className="text-[9px] text-orange-400">
@@ -1082,16 +1884,40 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-3">
-              <input
-                type="range"
-                min="0"
-                max="100"
-                step="5"
-                value={Math.round((save.taxRate ?? 0.20) * 100)}
-                onChange={(e) => handleTaxChange(parseInt(e.target.value) / 100)}
-                className="w-40 h-2 accent-blue-500 cursor-pointer"
-              />
+            {/* Dar ekranda −/slider/+ grubu ile mutluluk+kapat bloğu alt alta sarar,
+                yoksa X butonu 375px'te sağdan taşıp erişilmez oluyor */}
+            <div className="flex items-center justify-center gap-3 flex-wrap sm:flex-nowrap w-full sm:w-auto">
+              {/* −/+ butonları: görsel 32px, dokunma alanı hit-target-sm ile 44px
+                  (bar ile orantılı görünüm + mobil erişilebilirlik birlikte) */}
+              <div className="flex items-center justify-center gap-1">
+                <button
+                  {...taxMinusHold}
+                  disabled={taxPct <= 0}
+                  className="w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg border border-slate-700 text-slate-300 hit-target-sm press-fx"
+                  title={`Vergiyi %${taxStep} azalt`}
+                  aria-label={`Vergiyi %${taxStep} azalt`}
+                >
+                  <Minus className="w-4 h-4" />
+                </button>
+                <input
+                  type="range"
+                  min="0"
+                  max="100"
+                  step={taxStep}
+                  value={taxPct}
+                  onChange={(e) => handleTaxChange(parseFloat(e.target.value))}
+                  className="w-40 h-2 accent-blue-500 cursor-pointer"
+                />
+                <button
+                  {...taxPlusHold}
+                  disabled={taxPct >= 100}
+                  className="w-8 h-8 flex items-center justify-center bg-slate-800 hover:bg-slate-700 active:bg-slate-600 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg border border-slate-700 text-slate-300 hit-target-sm press-fx"
+                  title={`Vergiyi %${taxStep} artır`}
+                  aria-label={`Vergiyi %${taxStep} artır`}
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+              </div>
               <div className="text-right min-w-[80px]">
                 <div className="text-xs font-mono" style={{
                   color: (save.happiness ?? 70) >= 60 ? '#4ade80' : (save.happiness ?? 70) >= 40 ? '#fbbf24' : '#f87171'
@@ -1104,7 +1930,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               </div>
               <button
                 onClick={() => setShowTaxPanel(false)}
-                className="p-1 text-slate-400 hover:text-white rounded transition-colors"
+                className="p-1 text-slate-400 hover:text-white rounded hit-target press-fx"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -1135,7 +1961,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 key={filter.id}
                 onClick={() => toggleFilter(filter.id)}
                 title={filter.label}
-                className={`p-1.5 rounded transition-all duration-200 ${isActive ? 'bg-slate-800 shadow-inner' : 'opacity-40 hover:opacity-100 hover:bg-slate-800/50 grayscale'}`}
+                className={`p-1.5 rounded hit-target-sm press-fx ${isActive ? 'bg-slate-800 shadow-inner' : 'opacity-40 hover:opacity-100 hover:bg-slate-800/50 grayscale'}`}
               >
                 <Icon className={`w-4 h-4 ${isActive ? filter.color : 'text-slate-400'}`} />
               </button>
@@ -1143,22 +1969,52 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
           })}
         </div>
 
-        {transferMode.active && !showTransferMenu && (
-          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 bg-purple-900/90 text-white px-4 py-2 rounded-lg border border-purple-500 shadow-xl flex items-center gap-4 animate-pulse">
-            <span className="text-sm font-medium"><b>{transferMode.sourceName}</b> ilinden transfer edilecek hedef ili haritadan seçin.</span>
-            <button
-              onClick={() => setTransferMode({active: false, sourceId: null, sourceName: null})}
-              className="bg-purple-800 hover:bg-purple-700 px-3 py-1 rounded text-xs font-bold transition-colors"
-            >
-              İptal
-            </button>
+        {/* Tur özeti şeridi: sessiz turlarda bile "bu tur ne oldu" nabzı */}
+        {turnSummary && (
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 z-10 px-3 py-1 bg-slate-900/90 backdrop-blur-md border border-slate-700/70 rounded-full text-[10px] font-mono flex items-center gap-2.5 shadow-lg pointer-events-none whitespace-nowrap">
+            <span className="text-slate-500">Tur {turnSummary.turn}</span>
+            <span className={turnSummary.money >= 0 ? 'text-green-400' : 'text-red-400'}>
+              {turnSummary.money >= 0 ? '+' : ''}{formatMoney(turnSummary.money)}
+            </span>
+            <span className={turnSummary.happy >= 0 ? 'text-yellow-300' : 'text-orange-400'}>
+              {happinessEmoji(save.happiness ?? 70)} {turnSummary.happy >= 0 ? '+' : ''}{turnSummary.happy.toFixed(1)}
+            </span>
+            <span className="text-blue-400">👥 +{formatCount(Math.max(0, turnSummary.pop))}</span>
           </div>
         )}
+
+        {/* Bağlama duyarlı başlangıç ipuçları: ilk fetihe kadar "sırada ne var"
+            rehberi. Durumdan türetilir (ayrı adım state'i yok — her zaman geçerli
+            tavsiye). İl paneli açıkken gizlenir (aynı köşeyi paylaşırlar). */}
+        {(() => {
+          if (save.tutorialDismissed || save.conqueredCountryIds.length > 0 || selectedTarget) return null;
+          const hint = save.wars.length === 0
+            ? (armyPower <= 0
+              ? { step: 1, text: 'Bir iline dokun → Ordu → asker ve tank üret. Ordusuz devlet hedef olur.' }
+              : { step: 2, text: 'Zayıf bir komşuya dokun ve savaş ilan et — komşu ordular her tur büyür, erken savaş ucuzdur.' })
+            : ((save.pendingOrders ?? []).length === 0
+              ? { step: 3, text: 'Kırmızı düşman bölgesine dokun → Taarruz Emri Ver → birlikleri seç.' }
+              : { step: 4, text: "Sonraki Tur'a bas — emirler tur sonunda işlenir. Tüm bölgeleri al, ülkeyi fethet!" });
+          return (
+            <div className="absolute top-2 left-2 z-10 max-w-[250px] p-2.5 bg-indigo-950/90 backdrop-blur-md border border-indigo-700/60 rounded-lg shadow-xl flex items-start gap-2">
+              <span className="text-[10px] font-black text-indigo-300 bg-indigo-900/80 rounded px-1.5 py-0.5 shrink-0">{hint.step}/4</span>
+              <span className="text-[11px] text-indigo-100 leading-snug flex-1">{hint.text}</span>
+              <button
+                onClick={() => setSave(prev => ({ ...prev, tutorialDismissed: true }))}
+                className="text-indigo-400 hover:text-white shrink-0"
+                aria-label="İpuçlarını kapat"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          );
+        })()}
 
         <WorldMap
           selectedId={selectedTarget?.id || null}
           onSelect={(id, name) => handleTargetSelect(id, name, isPlayerRegion(save, id) || !!save.occupiedProvinces[id])}
           playerCountryId={save.playerCountryId}
+          playerColor={save.playerColor}
           provinceUnits={save.provinceUnits}
           provinceInvestments={save.provinceInvestments}
           activeFilters={activeFilters}
@@ -1168,9 +2024,6 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
           wars={save.wars}
           capturedEnemyProvinces={save.capturedEnemyProvinces}
           enemyProvinceStrength={save.enemyProvinceStrength}
-          transferArrow={transferMode.active && transferMode.sourceId
-            ? { from: transferMode.sourceId, to: showTransferMenu && selectedTarget ? selectedTarget.id : null }
-            : null}
           occupiedGarrisons={save.occupiedGarrisons}
           orders={save.pendingOrders}
           battleFlash={mapFlash}
@@ -1214,9 +2067,8 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                       ? <span className="text-orange-400">{occupiedCount} il işgalde</span>
                       : war.lastPlayerLoss > 0 && <span className="text-red-400">Zayiat: -{formatCount(war.lastPlayerLoss)}</span>}
                   </div>
-                  {war.warType === 'harita' ? (
-                    /* Harita savaşı: eyalet ilerlemesi + emir ipucu */
-                    (() => {
+                  {/* Eyalet ilerlemesi + emir ipucu */}
+                  {(() => {
                       const progress = warProvinceProgress(save, war.countryId);
                       const myOrders = save.pendingOrders.filter(o => countryOfProvince(o.to) === war.countryId
                         || save.occupiedProvinces[o.to] === war.countryId);
@@ -1241,30 +2093,51 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                               ⚠️ Taarruz emri yok — haritada düşman iline dokun
                             </span>
                           )}
+                          {/* Savaşı Bitir (İlhak): AI kabul/ret önizlemesiyle kompakt teklif */}
+                          {progress.captured > 0 && (() => {
+                            const decision = evaluateAnnexOffer(save, war.countryId, armyPower);
+                            if (!decision) return null;
+                            const cooldownLeft = Math.max(0, (save.annexOffers?.[war.countryId] ?? 0) - save.turn);
+                            return (
+                              <button
+                                onClick={() => setSave(prev =>
+                                  applyAnnexOffer(prev, war.countryId, armyPower)?.save ?? prev)}
+                                disabled={cooldownLeft > 0}
+                                title={decision.factors.length > 0
+                                  ? decision.factors.map(f => `${f.delta > 0 ? '+' : ''}${f.delta} ${f.label}`).join('\n')
+                                  : 'Belirleyici etken yok (0 puan)'}
+                                className={`w-full mt-1 py-1 rounded text-[10px] font-medium border transition-colors press-fx ${
+                                  cooldownLeft > 0
+                                    ? 'bg-slate-800/50 text-slate-600 border-slate-700/50 cursor-not-allowed'
+                                    : decision.accepted
+                                      ? 'bg-green-900/40 hover:bg-green-800/60 text-green-300 border-green-900/50'
+                                      : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-600'
+                                }`}
+                              >
+                                {cooldownLeft > 0
+                                  ? `🏳️ Teklif reddedildi — ${cooldownLeft} tur`
+                                  : `🏳️ İlhakla bitir · puan ${decision.score}/${ANNEX_ACCEPT_THRESHOLD} → ${decision.accepted ? 'kabul eder' : 'reddeder'}`}
+                              </button>
+                            );
+                          })()}
+                          {/* Geri Çekilme: bedelsiz ama topraksız çıkış (iki dokunuşlu onay) */}
+                          <button
+                            onClick={() => confirmTap(`retreat-${war.countryId}`, () =>
+                              setSave(prev => retreatFromWar(prev, war.countryId)))}
+                            title={`Ele geçirilen bölgeler iade edilir; −${RETREAT_HAPPINESS_COST} mutluluk. Savaş ${RETREAT_TRUCE_MIN_WAR_TURNS}+ tur sürdüyse ${RETREAT_TRUCE_DURATION} tur kısa ateşkes (erken kaçış ateşkes vermez). Bedel ödenmez.`}
+                            className={`w-full mt-1 py-1 rounded text-[10px] font-medium border transition-colors press-fx ${
+                              confirmKey === `retreat-${war.countryId}`
+                                ? 'bg-amber-900/50 hover:bg-amber-800/60 text-amber-200 border-amber-700/60'
+                                : 'bg-slate-800 hover:bg-slate-700 text-slate-400 border-slate-600'
+                            }`}
+                          >
+                            {confirmKey === `retreat-${war.countryId}`
+                              ? `⚠️ Emin misin? Bölgeler iade, −${RETREAT_HAPPINESS_COST} mutluluk`
+                              : '🏃 Geri Çekil'}
+                          </button>
                         </div>
                       );
-                    })()
-                  ) : (
-                    /* Deniz aşırı (havuz) savaş: cephe ordusu + konuşlandırma */
-                    <div className="mb-1.5">
-                      {frontHasUnits(war.front) ? (
-                        <div className="flex gap-2 text-[9px] font-mono text-slate-400">
-                          <span className="text-slate-500">Cephe:</span>
-                          <span>🪖 {formatCount(war.front!.asker)}</span>
-                          <span>🛡️ {formatCount(war.front!.tank)}</span>
-                          <span>✈️ {formatCount(war.front!.ucak)}</span>
-                        </div>
-                      ) : (
-                        <span className="text-[9px] text-yellow-400 font-medium">⚠️ Cephede ordu yok</span>
-                      )}
-                      <button
-                        onClick={() => { setDeployDraft({}); setShowDeployMenu(war.countryId); }}
-                        className="w-full mt-1 py-1 rounded text-[10px] font-medium border border-amber-800/60 bg-amber-900/40 hover:bg-amber-800/60 text-amber-300 transition-colors"
-                      >
-                        ⚔️ Birlik Gönder
-                      </button>
-                    </div>
-                  )}
+                    })()}
                   <button
                     onClick={() => handleSignPeace(war.countryId)}
                     disabled={!peace.affordable}
@@ -1289,7 +2162,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
           <div className="absolute bottom-4 right-4 z-10 bg-slate-900/90 backdrop-blur-md border border-red-900/60 rounded-lg shadow-xl max-w-[250px] flex flex-col">
             <div className="px-2.5 py-1.5 border-b border-slate-800 flex items-center justify-between gap-2">
               <span className="text-[10px] font-bold text-red-300 tracking-wider">⚔️ EMİR KUYRUĞU ({save.pendingOrders.length})</span>
-              <span className="text-[8px] text-slate-500">tur sonunda işlenir</span>
+              <span className="text-[8px] text-slate-500">tur sonunda işlenir · İptal ile geri al</span>
             </div>
             <div className="max-h-[140px] overflow-y-auto p-1.5 flex flex-col gap-1">
               {save.pendingOrders.map(order => (
@@ -1306,10 +2179,10 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                   </div>
                   <button
                     onClick={() => setSave(prev => cancelOrder(prev, order.id))}
-                    className="p-0.5 text-slate-500 hover:text-red-300 hover:bg-red-950/60 rounded transition-colors shrink-0"
-                    title="Emri iptal et"
+                    className="px-2 py-1 text-[9px] font-bold text-red-300 bg-red-950/50 hover:bg-red-900/70 border border-red-900/60 rounded shrink-0 hit-target-sm press-fx"
+                    title="Emri iptal et — birlikler serbest kalır, tur sonunda hiçbir şey olmaz"
                   >
-                    <X className="w-3 h-3" />
+                    ✕ İptal
                   </button>
                 </div>
               ))}
@@ -1343,40 +2216,6 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               </button>
             </div>
           )}
-          {/* Cephesine ordu gönderilmemiş savaş var */}
-          {(() => {
-            const emptyFrontWar = save.wars.find(w => w.initiator === 'player' && w.warType !== 'harita'
-              && save.turn > w.startedTurn && w.enemyStrength > 0 && !frontHasUnits(w.front));
-            if (!emptyFrontWar) return null;
-            const key = `emptyfront-${emptyFrontWar.countryId}-${emptyFrontWar.startedTurn}`;
-            if (dismissedBannerKeys.includes(key)) return null;
-            return (
-              <div className="relative bg-yellow-900/90 text-yellow-200 pl-4 pr-8 py-2 rounded-lg border border-yellow-600 shadow-xl text-sm font-medium">
-                ⚠️ {emptyFrontWar.countryName} cephesinde ordu yok — savaş panelinden "Birlik Konuşlandır" ile asker gönderin.
-                <button onClick={() => dismissBanner(key)} className="absolute top-1.5 right-1.5 p-0.5 text-yellow-300 hover:text-white hover:bg-yellow-800 rounded transition-colors">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            );
-          })()}
-          {/* Direnç kırıldı, fetih cephede piyade bekliyor */}
-          {(() => {
-            const waiting = save.wars.find(w => w.initiator === 'player' && w.warType !== 'harita'
-              && w.enemyStrength <= 0 && save.turn > w.startedTurn);
-            if (!waiting) return null;
-            const key = `waitinfantry-${waiting.countryId}-${waiting.startedTurn}`;
-            if (dismissedBannerKeys.includes(key)) return null;
-            const needed = Math.round(waiting.enemyMaxStrength * 0.2);
-            const atFront = waiting.front?.asker ?? 0;
-            return (
-              <div className="relative bg-amber-900/90 text-amber-200 pl-4 pr-8 py-2 rounded-lg border border-amber-600 shadow-xl text-sm font-medium">
-                🚩 {waiting.countryName} direnci kırıldı — fetih için cephede en az {formatCount(needed)} asker gerekli (şu an {formatCount(atFront)}).
-                <button onClick={() => dismissBanner(key)} className="absolute top-1.5 right-1.5 p-0.5 text-amber-300 hover:text-white hover:bg-amber-800 rounded transition-colors">
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            );
-          })()}
         </div>
 
         {/* Olay bildirimleri */}
@@ -1516,159 +2355,13 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               /* ---------------- İL PANELİ ---------------- */
               <div className="flex gap-2 w-full flex-1 min-h-0">
                 {showInvestmentMenu ? (
-                  <div className="flex flex-col gap-1.5 w-full min-h-0">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-0.5 shrink-0">YATIRIM YAP ($)</span>
-
-                    {/* Canlı durum: oyuncu tarımın gelir dışı işlevini (ordu iaşesi) burada görür */}
-                    {(() => {
-                      const food = armyFoodRatio(save);
-                      const hungry = food < 0.999;
-                      return (
-                        <div className={`flex justify-between items-center px-2 py-1 rounded border shrink-0 text-[10px] ${
-                          hungry ? 'bg-red-950/40 border-red-900/50 text-red-300' : 'bg-slate-950/60 border-slate-800 text-slate-400'
-                        }`}>
-                          <span>🌾 Ordu iaşesi</span>
-                          <span className="font-mono">%{Math.round(food * 100)}{hungry ? ' — asker bakımı artıyor' : ''}</span>
-                        </div>
-                      );
-                    })()}
-
-                    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5 -mr-1 pr-1">
-                    {[
-                      { id: 'tarim', label: 'Tarım', hint: 'Gelir + gıda: nüfusu büyütür, ORDUYU besler. Aç ordu pahalıya oturur.' },
-                      { id: 'sanayi', label: 'Sanayi', hint: 'Salt gelir — en yüksek getirili yatırım.' },
-                      { id: 'nufus', label: 'Nüfus Teşviki', hint: `${POP_COST_PER_PERSON}$ = 1 kişi · ÜLKE GENELİNE dağıtılır (her ilin asker havuzu büyür)` },
-                    ].map(type => {
-                      const inv = save.provinceInvestments[selectedTarget.id] || {};
-                      const inputAmount = parseInt(investmentDraft[type.id]?.toString() || '0') || 0;
-                      let currentLine = '';
-                      let previewLine = '';
-                      if (type.id === 'nufus') {
-                        currentLine = `Nüfus: ${formatCount(inv.nufus || 0)}`;
-                        if (inputAmount > 0) previewLine = `+${formatCount(Math.floor(inputAmount / POP_COST_PER_PERSON))} kişi · ülke geneline`;
-                      } else {
-                        const rate = INVESTMENT_RATES[type.id as 'tarim' | 'sanayi'];
-                        // Motorla aynı doygunluk eğrisi: gösterge gerçek getiriden sapmaz
-                        const raw = inv[type.id] || 0;
-                        const effCur = effectiveInvestment(raw);
-                        // Doluluk: bu bölgedeki kovanın ne kadarı dolu — %50'de yarı verim,
-                        // yüksekse parayı BAŞKA bölgeye taşı sinyali
-                        const fullness = Math.round(raw / (raw + INVESTMENT_SOFT_CAP) * 100);
-                        currentLine = `Üretim: ${formatMoney(effCur * rate)}/tur · doluluk %${fullness}${fullness >= 60 ? ' ⚠️ başka bölgeye yatır' : ''}`;
-                        if (inputAmount > 0) {
-                          const effNext = effectiveInvestment((inv[type.id] || 0) + inputAmount);
-                          previewLine = `→ ${formatMoney(effNext * rate)}/tur`;
-                        }
-                      }
-
-                      return (
-                        <div key={type.id} className="flex flex-col gap-0.5 mb-1 bg-slate-900/50 p-1.5 rounded border border-slate-800/50">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex-1">
-                              <span className="text-xs text-slate-300 block">{type.label}</span>
-                              <span className="text-[9px] text-slate-500">{type.hint}</span>
-                            </div>
-                            <Stepper
-                              value={investmentDraft[type.id] || 0}
-                              step={UI_STEPS[type.id]}
-                              format={formatMoney}
-                              onStep={stepDraft(setInvestmentDraft, type.id)}
-                            />
-                          </div>
-                          <div className="flex justify-between items-center text-[10px] mt-0.5">
-                            <span className="text-slate-500">{currentLine}</span>
-                            {previewLine && <span className="text-green-400 font-mono">{previewLine}</span>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                    </div>
-
-                    {investmentCost > 0 && (
-                      <div className="flex justify-between items-center text-xs px-1 mb-1 shrink-0">
-                        <span className="text-slate-400">Toplam Maliyet:</span>
-                        <span className={`font-mono font-bold ${save.money >= investmentCost ? 'text-green-400' : 'text-red-400'}`}>
-                          {formatMoney(investmentCost)}
-                        </span>
-                      </div>
-                    )}
-                    <div className="flex gap-2 mt-1 shrink-0">
-                      <button
-                        onClick={() => { setShowInvestmentMenu(false); setInvestmentDraft({ tarim: '', sanayi: '', nufus: '' }); }}
-                        className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium border border-slate-600 transition-colors"
-                      >
-                        İptal
-                      </button>
-                      <button
-                        onClick={handleProduceInvestment}
-                        disabled={investmentCost === 0 || investmentCost > save.money}
-                        className={`flex-1 py-1 rounded text-xs font-medium border transition-colors ${
-                          investmentCost > 0 && investmentCost <= save.money
-                            ? 'bg-green-900/40 hover:bg-green-800/60 text-green-300 border-green-900/50'
-                            : 'bg-slate-800/50 text-slate-500 border-slate-700/50 cursor-not-allowed'
-                        }`}
-                      >
-                        Yatırım Yap
-                      </button>
-                    </div>
-                  </div>
+                  renderInvestmentMenu()
                 ) : showArmyMenu ? (
                   renderArmyMenu()
                 ) : showBorderMenu ? (
                   renderBorderMenu()
-                ) : showTransferMenu ? (
-                  <div className="flex flex-col gap-1.5 w-full min-h-0">
-                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mb-0.5 shrink-0">ORDU TRANSFERİ ({transferMode.sourceName} &rarr; {selectedTarget.name})</span>
-                    <span className="text-[9px] text-purple-300/80 shrink-0">🔁 Tur sonunda varır — yoldaki birlikler kaynağı ancak %25 verimle savunur. Yapılar ve gemiler taşınamaz.</span>
-
-                    <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-1.5 -mr-1 pr-1">
-                    {(['asker', 'tank', 'ucak'] as const).map(unitId => {
-                      // Serbest birlik: mevcuttan BAŞKA emirlere bağlananlar düşülür.
-                      // Aynı kaynak→hedef MOVE emri sayılmaz: Gönder onu DEĞİŞTİRİR —
-                      // eski emri kilitli saymak, emri büyütmeyi imkansız kılıp tam
-                      // tersine küçültüyordu (2026-07-14 oyuncu testi, 6000→5000).
-                      const total = save.provinceUnits[transferMode.sourceId || '']?.[unitId] || 0;
-                      const lockedAll = committedUnits(save, transferMode.sourceId || '')[unitId] || 0;
-                      const sameRoute = (save.pendingOrders ?? []).find(o =>
-                        o.type === 'MOVE' && o.from === transferMode.sourceId && o.to === selectedTarget.id);
-                      const locked = Math.max(0, lockedAll - (sameRoute?.units[unitId] || 0));
-                      const free = Math.max(0, total - locked);
-                      return (
-                      <div key={unitId} className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-1 flex-1">
-                          <span className="text-xs text-slate-300">{UNIT_LABELS[unitId]}</span>
-                          <span className="text-[9px] text-slate-500">Serbest: {formatCount(free)}{locked > 0 ? ` (${formatCount(locked)} emirde)` : ''}</span>
-                        </div>
-                        <Stepper
-                          value={transferDraft[unitId] || 0}
-                          step={UI_STEPS[unitId]}
-                          format={formatCount}
-                          onStep={stepDraft(setTransferDraft, unitId, free)}
-                        />
-                      </div>
-                      );
-                    })}
-                    </div>
-
-                    <div className="flex gap-2 mt-1 shrink-0">
-                      <button
-                        onClick={() => {
-                          setShowTransferMenu(false);
-                          setTransferMode({ active: false, sourceId: null, sourceName: null });
-                          setSelectedTarget(null);
-                        }}
-                        className="flex-1 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-xs font-medium border border-slate-600 transition-colors"
-                      >
-                        İptal
-                      </button>
-                      <button
-                        onClick={handleTransferArmy}
-                        className="flex-1 py-1 bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 rounded text-xs font-medium border border-purple-900/50 transition-colors"
-                      >
-                        Gönder
-                      </button>
-                    </div>
-                  </div>
+                ) : showGatherMenu ? (
+                  renderGatherMenu()
                 ) : showDisbandMenu ? (
                   (() => {
                     const units = save.provinceUnits[selectedTarget.id] || {};
@@ -1783,12 +2476,23 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                     </button>
                     <button
                       onClick={() => {
-                        setTransferMode({ active: true, sourceId: selectedTarget.id, sourceName: selectedTarget.name });
-                        setSelectedTarget(null);
+                        // Açılış varsayılanları: tür filtreleri işaretli, çağrılabilir
+                        // birliği olan TÜM iller seçili (yaygın senaryo: hepsini topla)
+                        setGatherFilters({ kara: true, hava: true });
+                        setGatherCustom({});
+                        setGatherExpanded({});
+                        const preset: Record<string, boolean> = {};
+                        for (const id of Object.keys(save.provinceUnits)) {
+                          if (id === selectedTarget.id || !isPlayerRegion(save, id)) continue;
+                          const f = gatherFreeUnits(id, selectedTarget.id);
+                          if (f.asker + f.tank + f.ucak > 0) preset[id] = true;
+                        }
+                        setSelectedSourceProvinces(preset);
+                        setShowGatherMenu(true);
                       }}
-                      className="py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 rounded text-xs font-medium border border-purple-900/50 transition-colors"
+                      className="py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 rounded text-xs font-medium border border-purple-900/50 transition-colors press-fx"
                     >
-                      Transfer
+                      Ordu Çağır
                     </button>
                     <button
                       onClick={() => setShowDisbandMenu(true)}
@@ -1823,6 +2527,9 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
 
                 if (isCaptured) {
                   if (showArmyMenu) return <div className="flex gap-2 w-full flex-1 min-h-0">{renderArmyMenu()}</div>;
+                  // İlhak edilen toprak da geliştirilebilir: tarım/sanayi yatırımı
+                  // provinceInvestments'a yazılır, gelir doğrudan hazineye akar
+                  if (showInvestmentMenu) return <div className="flex gap-2 w-full flex-1 min-h-0">{renderInvestmentMenu()}</div>;
                   return (
                     <div className="flex flex-col gap-2 w-full">
                       <div className="flex items-center gap-2 py-1.5 px-2 bg-blue-900/40 border border-blue-800/60 rounded-lg text-xs text-blue-300 font-bold">
@@ -1847,22 +2554,38 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                           hava akını yapabilirsin (haritada hedefe dokun).
                         </p>
                       )}
-                      {/* Kendi ilimizden farksız: üretim + transfer (asker hariç — yerel halk devşirilemez) */}
+                      {/* Kendi ilimizden farksız: yatırım + üretim + ordu çağırma
+                          (asker hariç — yerel halk devşirilemez) */}
                       <div className="grid grid-cols-2 gap-1.5 w-full">
                         <button
+                          onClick={() => { setInvestmentDraft({ tarim: '', sanayi: '', nufus: '' }); setShowInvestmentMenu(true); }}
+                          className="col-span-2 py-1.5 bg-blue-900/40 hover:bg-blue-800/60 text-blue-300 rounded text-xs font-medium border border-blue-900/50 transition-colors press-fx"
+                        >
+                          Yatırım Yap — ilhak toprağını geliştir
+                        </button>
+                        <button
                           onClick={() => { setArmyDraft(EMPTY_UNIT_DRAFT); setShowArmyMenu(true); }}
-                          className="py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium border border-slate-600 transition-colors"
+                          className="py-1.5 bg-slate-800 hover:bg-slate-700 rounded text-xs font-medium border border-slate-600 transition-colors press-fx"
                         >
                           Üretim
                         </button>
                         <button
                           onClick={() => {
-                            setTransferMode({ active: true, sourceId: provId, sourceName: selectedTarget.name });
-                            setSelectedTarget(null);
+                            setGatherFilters({ kara: true, hava: true });
+                            setGatherCustom({});
+                            setGatherExpanded({});
+                            const preset: Record<string, boolean> = {};
+                            for (const id of Object.keys(save.provinceUnits)) {
+                              if (id === provId || !isPlayerRegion(save, id)) continue;
+                              const f = gatherFreeUnits(id, provId);
+                              if (f.asker + f.tank + f.ucak > 0) preset[id] = true;
+                            }
+                            setSelectedSourceProvinces(preset);
+                            setShowGatherMenu(true);
                           }}
-                          className="py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 rounded text-xs font-medium border border-purple-900/50 transition-colors"
+                          className="py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 rounded text-xs font-medium border border-purple-900/50 transition-colors press-fx"
                         >
-                          Transfer
+                          Ordu Çağır
                         </button>
                       </div>
                     </div>
@@ -1886,6 +2609,21 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                         </span>
                       </div>
                     </div>
+                    {/* Fetih ilerlemesi bir bakışta: ülkenin kaç bölgesi var, kaçı ayakta */}
+                    {(() => {
+                      const regs = countryRegions(cid);
+                      const kalan = regs.filter(r => !(save.capturedEnemyProvinces ?? []).includes(r)).length;
+                      return (
+                        <div className="flex justify-between items-center bg-slate-950/60 rounded p-1.5 border border-slate-800 text-[10px]">
+                          <span className="text-slate-500">🗺️ {cName} bölgeleri</span>
+                          <span className="font-mono text-slate-200">
+                            {kalan === regs.length
+                              ? `${regs.length} bölge`
+                              : <>ayakta <span className="text-red-300 font-bold">{kalan}</span> / {regs.length} · sende <span className="text-blue-300 font-bold">{regs.length - kalan}</span></>}
+                          </span>
+                        </div>
+                      );
+                    })()}
                     {queued.length > 0 && (
                       <div className="bg-red-950/40 border border-red-800/50 rounded-lg p-2 text-[10px] text-red-200">
                         ⚔️ {queued.length} taarruz emri kuyrukta — tur sonunda saldırılacak
@@ -1943,14 +2681,33 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                           <p className="text-[9px] text-blue-300 text-center py-1">
                             🕊️ Saldırmazlık paktı — {(save.pacts?.[cid] || 0) - save.turn} tur boyunca iki taraf da saldıramaz.
                           </p>
-                        ) : (
+                        ) : (() => {
+                          // Ülke panelindeki kapının AYNISI: kara sınırı yoksa liman+gemi
+                          // +deniz rotası şart — bölge panelinden donanmasız denizaşırı
+                          // ilanla "donuk savaşa" (emir verilemeyen, 60 tur bedel
+                          // biriktiren savaş) girilebiliyordu.
+                          const needsFleet = borderRegionsWith(save, [cid]).length === 0
+                            && !canLaunchSeaInvasion(save, cid);
+                          return needsFleet ? (
+                            <p className="text-[9px] text-slate-500 text-center py-1">
+                              🚢 Kara sınırımız yok — savaş için kıyı ilinde LİMAN kur, GEMİ üret.
+                            </p>
+                          ) : (
                           <button
-                            onClick={() => setSave(prev => startWar(prev, cid, cName))}
-                            className="w-full py-3 bg-red-800 hover:bg-red-700 active:bg-red-900 text-white font-extrabold rounded-lg text-xs tracking-wider transition-all flex items-center justify-center gap-1.5"
+                            onClick={() => confirmTap(`war-${cid}`, () => setSave(prev => startWar(prev, cid, cName)))}
+                            className={`w-full py-3 text-white font-extrabold rounded-lg text-xs tracking-wider transition-all flex items-center justify-center gap-1.5 ${
+                              confirmKey === `war-${cid}`
+                                ? 'bg-red-600 animate-pulse ring-2 ring-red-400'
+                                : 'bg-red-800 hover:bg-red-700 active:bg-red-900'
+                            }`}
                           >
-                            <Swords className="w-4 h-4" /> {cName.toUpperCase()}'A SAVAŞ İLAN ET
+                            <Swords className="w-4 h-4" />
+                            {confirmKey === `war-${cid}`
+                              ? 'EMİN MİSİN? — İLİŞKİLER DİBE VURUR'
+                              : `${cName.toUpperCase()}'A SAVAŞ İLAN ET`}
                           </button>
-                        )}
+                          );
+                        })()}
                       </>
                     )}
                   </div>
@@ -1961,9 +2718,10 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               <div className="flex flex-col gap-2 w-full flex-1 min-h-0 overflow-y-auto">
                 {(() => {
                   const liveStrength = getAiMilitary(save, selectedTarget.id);
-                  // Fethedilmişse devralınan gelir, değilse ülkenin CANLI (büyüyen) ekonomisi
+                  // Fethedilmişse TOPLAM katkı (devralınan + eyalet yatırımları),
+                  // değilse ülkenin CANLI (büyüyen) ekonomisi
                   const liveIncome = selectedConquered
-                    ? conqueredCountryIncome(save, selectedTarget.id)
+                    ? conqueredCountryTotalIncome(save, selectedTarget.id)
                     : getAiEconomy(save, selectedTarget.id).income;
                   // Barışta ordusu her tur büyür — beklemenin bedeli burada görünür
                   const growthPerTurn = selectedConquered ? 0 : aiMilitaryGrowthPerTurn(save, selectedTarget.id);
@@ -1980,6 +2738,24 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                         <span className="text-[9px] text-slate-500 block">{selectedConquered ? 'GELİR KATKISI' : 'GELİR (FETİHTE)'}</span>
                         <span className="font-mono text-green-300">{formatMoney(liveIncome)}/tur</span>
                       </div>
+                      {/* Ülkenin bölge sayısı: fetih hedefinin boyutu / savaşta kalan */}
+                      {(() => {
+                        const regs = countryRegions(selectedTarget.id);
+                        if (regs.length === 0) return null;
+                        const kalan = regs.filter(r => !(save.capturedEnemyProvinces ?? []).includes(r)).length;
+                        return (
+                          <div className="col-span-2 bg-slate-950/60 rounded p-1.5 border border-slate-800 flex justify-between items-center">
+                            <span className="text-[9px] text-slate-500">🗺️ BÖLGELER</span>
+                            <span className="font-mono text-slate-200 text-[11px]">
+                              {selectedConquered
+                                ? `${regs.length} bölge — tamamı sende`
+                                : kalan === regs.length
+                                  ? `${regs.length} bölge`
+                                  : <>ayakta <span className="text-red-300 font-bold">{kalan}</span> / {regs.length} · sende <span className="text-blue-300 font-bold">{regs.length - kalan}</span></>}
+                            </span>
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })()}
@@ -1992,7 +2768,9 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                         <Flag className="w-3.5 h-3.5" /> Fethedildi — topraklarımızın parçası
                       </span>
                       <span className="text-[9px] text-blue-400/80 font-normal">
-                        Tarım ve sanayisi devralındı: +{formatMoney(conqueredCountryIncome(save, selectedTarget.id))}/tur hazineye akıyor.
+                        Tarım ve sanayisi devralındı: +{formatMoney(conqueredCountryTotalIncome(save, selectedTarget.id))}/tur hazineye akıyor
+                        {conqueredRegionalIncome(save, selectedTarget.id) > 0 &&
+                          ` (+${formatMoney(conqueredRegionalIncome(save, selectedTarget.id))} eyalet yatırımlarından)`}.
                       </span>
                     </div>
                     {/* Bölgede konuşlu birlikler + ordu üretimi */}
@@ -2081,70 +2859,99 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                         {selectedWar.initiator === 'ai' ? 'Saldıran güç' : 'Kalan düşman gücü'}: {formatCount(selectedWar.enemyStrength)}
                       </span>
                     </div>
-                    {selectedWar.warType === 'harita' ? (
-                      /* Harita savaşı: eyalet ilerlemesi + oynanış yönlendirmesi */
-                      (() => {
+                    {/* Eyalet ilerlemesi + ilhak teklifi + geri çekilme */}
+                    {(() => {
                         const progress = warProvinceProgress(save, selectedWar.countryId);
+                        const decision = evaluateAnnexOffer(save, selectedWar.countryId, armyPower);
+                        const cooldownLeft = Math.max(0, (save.annexOffers?.[selectedWar.countryId] ?? 0) - save.turn);
+                        const retreatKey = `retreat-${selectedWar.countryId}`;
                         return (
-                          <div className="bg-slate-950/60 rounded p-2 border border-slate-800 text-[10px] flex flex-col gap-1">
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Ele geçirilen bölge:</span>
-                              <span className="font-mono text-blue-300 font-bold">{progress.captured}/{progress.total}</span>
-                            </div>
-                            <div className="flex justify-between">
-                              <span className="text-slate-400">Anavatan rezervi:</span>
-                              <span className="font-mono text-red-300">{formatCount(getAiMilitary(save, selectedWar.countryId))}</span>
-                            </div>
-                            <span className="text-[9px] text-slate-500 leading-relaxed">
-                              Haritada {selectedWar.countryName} bölgelerine dokunup TAARRUZ EMRİ ver.
-                              Tüm bölgeler düşünce ülke fethedilir. Rezerv her tur cepheye takviye sızdırır — hızlı davran!
-                            </span>
-                          </div>
-                        );
-                      })()
-                    ) : (
-                      /* Deniz aşırı havuz savaşı: cephe ordusu yönetimi */
-                      <>
-                        {(() => {
-                          const front = selectedWar.front ?? EMPTY_FRONT;
-                          if (!frontHasUnits(front)) {
-                            return (
-                              <div className="flex items-center gap-2 py-1.5 px-2 bg-yellow-900/30 border border-yellow-800/50 rounded text-[10px] text-yellow-300 font-medium">
-                                ⚠️ Cephede ordu yok — birlik konuşlandırmadan saldırı yapılmaz!
+                          <>
+                            <div className="bg-slate-950/60 rounded p-2 border border-slate-800 text-[10px] flex flex-col gap-1">
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Ele geçirilen bölge:</span>
+                                <span className="font-mono text-blue-300 font-bold">{progress.captured}/{progress.total}</span>
                               </div>
-                            );
-                          }
-                          return (
-                            <div className="bg-slate-950/60 rounded p-1.5 border border-slate-800 text-[10px]">
-                              <span className="text-[9px] text-slate-400 font-bold uppercase block mb-0.5">CEPHE ORDUSU</span>
-                              <div className="flex gap-3 font-mono text-slate-300">
-                                <span>🪖 {formatCount(front.asker)}</span>
-                                <span>🛡️ {formatCount(front.tank)}</span>
-                                <span>✈️ {formatCount(front.ucak)}</span>
+                              <div className="flex justify-between">
+                                <span className="text-slate-400">Anavatan rezervi:</span>
+                                <span className="font-mono text-red-300">{formatCount(getAiMilitary(save, selectedWar.countryId))}</span>
                               </div>
-                              <span className="text-[9px] text-red-400 font-mono">Saldırı gücü: {formatCount(frontAttackPower(front, hMult))}</span>
+                              {decision && (
+                                <div className="flex justify-between">
+                                  <span className="text-slate-400">Düşman savaş yorgunluğu:</span>
+                                  <span className={`font-mono ${decision.weariness > 70 ? 'text-green-400' : 'text-slate-300'}`}>%{decision.weariness}</span>
+                                </div>
+                              )}
+                              <span className="text-[9px] text-slate-500 leading-relaxed">
+                                Haritada {selectedWar.countryName} bölgelerine dokunup TAARRUZ EMRİ ver.
+                                Tüm bölgeler düşünce ülke fethedilir. Rezerv her tur cepheye takviye sızdırır — hızlı davran!
+                              </span>
                             </div>
-                          );
-                        })()}
-                        <div className="flex gap-1.5">
-                          <button
-                            onClick={() => { setDeployDraft({}); setShowDeployMenu(selectedWar.countryId); }}
-                            className="flex-1 py-1.5 rounded text-xs font-bold border border-amber-700/60 bg-amber-900/40 hover:bg-amber-800/60 text-amber-300 transition-colors"
-                          >
-                            ⚔️ Birlik Konuşlandır
-                          </button>
-                          {frontHasUnits(selectedWar.front) && (
+
+                            {/* Savaşı Bitir (İlhak): AI karar matrisi önizlemesi + teklif */}
+                            {decision && progress.captured > 0 ? (
+                              <div className="bg-slate-950/60 rounded p-2 border border-slate-800 text-[10px] flex flex-col gap-1">
+                                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">
+                                  🏳️ SAVAŞI BİTİR — {progress.captured} BÖLGEYİ İLHAK ET
+                                </span>
+                                {decision.factors.length === 0 && (
+                                  <span className="text-slate-500">Belirleyici etken yok — AI kayıtsız (0 puan).</span>
+                                )}
+                                {decision.factors.map((f, i) => (
+                                  <div key={i} className="flex justify-between gap-2">
+                                    <span className="text-slate-400">{f.label}</span>
+                                    <span className={`font-mono shrink-0 ${f.delta > 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                      {f.delta > 0 ? '+' : ''}{f.delta}
+                                    </span>
+                                  </div>
+                                ))}
+                                <div className="flex justify-between border-t border-slate-800 pt-1">
+                                  <span className="text-slate-300 font-bold">Karar puanı (eşik {ANNEX_ACCEPT_THRESHOLD}):</span>
+                                  <span className={`font-mono font-bold ${decision.accepted ? 'text-green-400' : 'text-red-400'}`}>
+                                    {decision.score} → {decision.accepted ? 'KABUL EDER' : 'REDDEDER'}
+                                  </span>
+                                </div>
+                                <button
+                                  onClick={() => setSave(prev =>
+                                    applyAnnexOffer(prev, selectedWar.countryId, armyPower)?.save ?? prev)}
+                                  disabled={cooldownLeft > 0}
+                                  className={`w-full py-1.5 mt-0.5 rounded text-xs font-bold border transition-colors press-fx ${
+                                    cooldownLeft > 0
+                                      ? 'bg-slate-800/50 text-slate-500 border-slate-700/50 cursor-not-allowed'
+                                      : decision.accepted
+                                        ? 'bg-green-900/40 hover:bg-green-800/60 text-green-300 border-green-900/50'
+                                        : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-600'
+                                  }`}
+                                >
+                                  {cooldownLeft > 0
+                                    ? `Teklif reddedildi — ${cooldownLeft} tur sonra yeniden`
+                                    : 'İlhak Teklifi Gönder'}
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-[9px] text-slate-500 px-0.5">
+                                💡 Bölge ele geçirince İLHAK TEKLİFİ açılır: kabul edilirse savaş biter, bölgeler sende kalır.
+                              </span>
+                            )}
+
+                            {/* Geri Çekilme: bedelsiz ama topraksız çıkış (iki dokunuşlu onay) */}
                             <button
-                              onClick={() => setSave(prev => withdrawFront(prev, selectedWar.countryId))}
-                              title="Cephedeki ordu sınır iline geri döner"
-                              className="px-2 py-1.5 rounded text-xs font-medium border border-slate-600 bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
+                              onClick={() => confirmTap(retreatKey, () =>
+                                setSave(prev => retreatFromWar(prev, selectedWar.countryId)))}
+                              title={`Ele geçirilen bölgeler iade edilir, birlikler yurda döner; −${RETREAT_HAPPINESS_COST} mutluluk. Savaş ${RETREAT_TRUCE_MIN_WAR_TURNS}+ tur sürdüyse ${RETREAT_TRUCE_DURATION} turluk kısa ateşkes (erken kaçış ateşkes vermez). Barış bedeli ödenmez.`}
+                              className={`w-full py-1.5 rounded text-xs font-medium border transition-colors press-fx ${
+                                confirmKey === retreatKey
+                                  ? 'bg-amber-900/50 hover:bg-amber-800/60 text-amber-200 border-amber-700/60'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-600'
+                              }`}
                             >
-                              Geri Çek
+                              {confirmKey === retreatKey
+                                ? `⚠️ Emin misin? Bölgeler iade, −${RETREAT_HAPPINESS_COST} mutluluk`
+                                : '🏃 Geri Çekil — bedelsiz çıkış, bölgeler iade'}
                             </button>
-                          )}
-                        </div>
-                      </>
-                    )}
+                          </>
+                        );
+                      })()}
                     {(() => {
                       const peace = peaceInfo(selectedWar);
                       return (
@@ -2265,6 +3072,15 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
         )}
       </div>
 
+      {/* Nasıl Oynanır rehberi: ilk girişte otomatik, sonra menüden. Kapanınca
+          guideSeen kaydedilir — bir daha kendiliğinden açılmaz. */}
+      {showGuide && (
+        <HowToPlay onClose={() => {
+          setShowGuide(false);
+          setSave(prev => prev.guideSeen ? prev : { ...prev, guideSeen: true });
+        }} />
+      )}
+
       {/* Duraklatma menüsü */}
       {showPauseMenu && (
         <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center">
@@ -2296,6 +3112,18 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
                 }`}
               >
                 {justSaved ? <><Check className="w-4 h-4" /> Kaydedildi</> : <><Save className="w-4 h-4" /> Kaydet</>}
+              </button>
+              <button
+                onClick={() => { setShowPauseMenu(false); setShowGuide(true); }}
+                className="flex items-center justify-center gap-2 py-3 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 font-bold rounded-lg border border-slate-700 transition-colors"
+              >
+                <BookOpen className="w-4 h-4" /> Nasıl Oynanır
+              </button>
+              <button
+                onClick={() => { persistSave(save); setShowPauseMenu(false); onExitToMenu(); }}
+                className="flex items-center justify-center gap-2 py-3 bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-200 font-bold rounded-lg border border-slate-700 transition-colors"
+              >
+                <DoorOpen className="w-4 h-4" /> Kaydet ve Çık
               </button>
               <button
                 onClick={() => { setShowPauseMenu(false); setShowExitConfirm(true); }}
@@ -2378,7 +3206,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             </h3>
 
             <div className="flex flex-col gap-4">
-              {isLandNeighbor(selectedTarget.id) ? (
+              {borderRegionsWith(save, [selectedTarget.id]).length > 0 ? (
                 <div className="flex flex-col text-left p-4 bg-slate-950 border border-red-900/40 rounded-xl">
                   <div className="flex items-center gap-2 text-red-400 font-bold text-sm mb-1">
                     <MapPin className="w-4 h-4" /> Cephe Savaşı (Harita)
@@ -2395,11 +3223,12 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
               ) : (
                 <div className="flex flex-col text-left p-4 bg-slate-950 border border-slate-700/50 rounded-xl">
                   <div className="flex items-center gap-2 text-cyan-400 font-bold text-sm mb-1">
-                    <Anchor className="w-4 h-4" /> Deniz Aşırı Sefer
+                    <Anchor className="w-4 h-4" /> Deniz Aşırı Sefer (Amfibi Harekât)
                   </div>
-                  <p className="text-[11px] text-slate-400">
-                    Kara sınırımız yok — sefer kuvveti limanlardan taşınır. Cepheye gönderdiğin ordu
-                    düşman direncini eritir; direnç kırıldığında cephedeki askerlerle işgal tamamlanır.
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Kara sınırımız yok — düşman kıyı bölgelerine <b>çıkarma emri</b> verirsin:
+                    limanlı kıyı ilindeki gemiler kara birliklerini taşır, uçaklar üsten uçar.
+                    Emirler tur sonunda işlenir; tüm bölgeler ele geçirilince ülke fethedilir.
                   </p>
                 </div>
               )}
@@ -2497,202 +3326,6 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
         </div>
       )}
 
-      {/* Birlik Konuşlandırma Modalı — seçilen birlikler ilden ayrılıp cepheye taşınır */}
-      {showDeployMenu && (() => {
-        const war = save.wars.find(w => w.countryId === showDeployMenu);
-        if (!war) return null;
-        const front = war.front ?? EMPTY_FRONT;
-
-        // Birlik bulunan tüm bölgeler: iller + fethedilen ülkeler (garnizonlar da sevk edilebilir)
-        const territoryName = (id: string) => regionName(id) || save.conqueredNames?.[id] || countryName(id);
-        const allProvinces = Object.keys(save.provinceUnits).filter(pId => {
-          const u = save.provinceUnits[pId];
-          return u && ((u.asker || 0) > 0 || (u.tank || 0) > 0 || (u.ucak || 0) > 0);
-        }).sort((a, b) => territoryName(a).localeCompare(territoryName(b), 'tr'));
-
-        // Bu seferde gönderilecek toplam
-        let addAsker = 0, addTank = 0, addUcak = 0;
-        for (const u of Object.values(deployDraft)) {
-          addAsker += u.asker || 0;
-          addTank += u.tank || 0;
-          addUcak += u.ucak || 0;
-        }
-        const hasAnySelected = addAsker > 0 || addTank > 0 || addUcak > 0;
-        // Karşı taarruzda (AI savaşı) hedef istila kuvveti değil düşman ANAVATANIDIR
-        const enemyRef = war.initiator === 'ai' ? getAiMilitary(save, war.countryId) : war.enemyStrength;
-        // Konuşlandırma sonrası cephenin toplam gücü
-        const projectedFront = {
-          asker: front.asker + addAsker,
-          tank: front.tank + addTank,
-          ucak: front.ucak + addUcak,
-        };
-        const projectedPower = frontAttackPower(projectedFront, hMult);
-        // Deniz aşırı sefer: liman kapasitesi sınırı (motor da ayrıca zorlar)
-        const overseas = isOverseas(war.countryId);
-        const seaCapacity = expeditionCapacity(save.provinceUnits);
-        const projectedWeight = frontWeight(projectedFront);
-        const overCapacity = overseas && projectedWeight > seaCapacity;
-
-        const sliderFor = (provId: string, key: 'asker' | 'tank' | 'ucak', avail: number, label: string, accent: string) => (
-          <div className="mb-1">
-            <div className="flex justify-between text-[9px] text-slate-400 mb-0.5">
-              <span>{label}</span>
-              <span className="font-mono">{formatCount(deployDraft[provId]?.[key] || 0)} / {formatCount(avail)}</span>
-            </div>
-            <input
-              type="range"
-              min={0}
-              max={avail}
-              step={Math.max(1, Math.floor(avail / 100))}
-              value={deployDraft[provId]?.[key] || 0}
-              onChange={(e) => {
-                const val = Math.min(avail, parseInt(e.target.value) || 0);
-                setDeployDraft(prev => ({
-                  ...prev,
-                  [provId]: { ...(prev[provId] || { asker: 0, tank: 0, ucak: 0 }), [key]: val }
-                }));
-              }}
-              className={`w-full ${accent} h-1.5`}
-            />
-          </div>
-        );
-
-        return (
-          <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-sm flex items-center justify-center p-3">
-            <div className="relative bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-lg shadow-2xl flex flex-col max-h-[90vh]">
-              {/* Header */}
-              <div className="p-4 pb-2 shrink-0 border-b border-slate-800">
-                <button
-                  onClick={() => setShowDeployMenu(null)}
-                  className="absolute top-3 right-3 p-1.5 text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-                <h3 className="text-sm font-black tracking-wide text-white flex items-center gap-2">
-                  <Swords className="w-4 h-4 text-amber-500" />
-                  CEPHEYE ORDU GÖNDER — {war.countryName}
-                </h3>
-                <p className="text-[10px] text-slate-500 mt-1">
-                  Seçilen birlikler illerden ayrılır ve cephe ordusuna katılır. Muharebeyi cephedeki ordu yapar;
-                  savaş bitince sağ kalanlar sınır iline döner. İstediğiniz tur takviye gönderebilirsiniz.
-                </p>
-                {frontHasUnits(front) && (
-                  <div className="mt-2 flex gap-3 text-[9px] font-mono text-slate-400 bg-slate-950/60 rounded p-1.5 border border-slate-800">
-                    <span className="text-slate-500 font-bold">CEPHEDE MEVCUT:</span>
-                    <span>🪖 {formatCount(front.asker)}</span>
-                    <span>🛡️ {formatCount(front.tank)}</span>
-                    <span>✈️ {formatCount(front.ucak)}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* İl listesi */}
-              <div className="flex-1 overflow-y-auto p-3 space-y-2 min-h-0">
-                {allProvinces.length === 0 && (
-                  <div className="text-center text-slate-500 py-6 text-xs bg-slate-950/30 rounded-xl border border-slate-800 border-dashed">
-                    Hiçbir ilde birlik yok — önce bir ilde Asker/Tank/Uçak üretin.
-                  </div>
-                )}
-                {allProvinces.map(provId => {
-                  const units = save.provinceUnits[provId] || {};
-                  const availAsker = units.asker || 0;
-                  const availTank = units.tank || 0;
-                  const availUcak = units.ucak || 0;
-
-                  return (
-                    <div key={provId} className="rounded-lg border p-2 bg-slate-950/80 border-slate-700/60">
-                      <div className="flex justify-between items-center mb-1.5">
-                        <span className="text-xs font-bold text-slate-200">{territoryName(provId)}</span>
-                      </div>
-                      {availAsker > 0 && sliderFor(provId, 'asker', availAsker, '🪖 Asker', 'accent-red-500')}
-                      {availTank > 0 && sliderFor(provId, 'tank', availTank, '🛡️ Tank', 'accent-yellow-500')}
-                      {availUcak > 0 && sliderFor(provId, 'ucak', availUcak, '✈️ Uçak', 'accent-blue-500')}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Footer — güç karşılaştırması ve onay */}
-              <div className="p-4 pt-2 shrink-0 border-t border-slate-800 space-y-2">
-                <button
-                  onClick={() => {
-                    const newDraft: Record<string, { asker: number; tank: number; ucak: number }> = {};
-                    for (const provId of allProvinces) {
-                      const units = save.provinceUnits[provId] || {};
-                      newDraft[provId] = {
-                        asker: units.asker || 0,
-                        tank: units.tank || 0,
-                        ucak: units.ucak || 0,
-                      };
-                    }
-                    setDeployDraft(newDraft);
-                  }}
-                  className="w-full py-1 rounded text-[10px] font-medium border border-slate-700/50 bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors"
-                >
-                  Tüm Birlikleri Seç
-                </button>
-
-                <div className="bg-slate-950/60 rounded p-2 border border-slate-800">
-                  <div className="flex justify-between text-[10px] mb-1">
-                    <span className="text-slate-400">Cephenin toplam gücü (sevkiyat sonrası):</span>
-                    <span className={`font-bold font-mono ${projectedPower > enemyRef ? 'text-green-400' : projectedPower > enemyRef * 0.5 ? 'text-yellow-400' : 'text-red-400'}`}>
-                      {formatCount(projectedPower)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between text-[10px]">
-                    <span className="text-slate-400">{war.initiator === 'ai' ? 'Düşman anavatan gücü (hedef):' : 'Düşman gücü:'}</span>
-                    <span className="font-mono text-red-400">{formatCount(enemyRef)}</span>
-                  </div>
-                  {overseas && (
-                    <div className="flex justify-between text-[10px] mt-1">
-                      <span className="text-slate-400">🌊 Sefer kapasitesi (liman):</span>
-                      <span className={`font-mono ${overCapacity ? 'text-red-400' : 'text-cyan-300'}`}>
-                        {formatCount(projectedWeight)} / {formatCount(seaCapacity)}
-                      </span>
-                    </div>
-                  )}
-                  {overCapacity && (
-                    <div className="text-[9px] text-red-400 mt-0.5">
-                      Kapasite aşılıyor — fazlası gemilere sığmaz, sığan kadarı sevk edilir. Daha çok Liman inşa edin.
-                    </div>
-                  )}
-                  <div className="flex gap-3 mt-1 text-[9px] font-mono text-slate-500">
-                    <span>Gönderilecek:</span>
-                    <span>🪖 {formatCount(addAsker)}</span>
-                    <span>🛡️ {formatCount(addTank)}</span>
-                    <span>✈️ {formatCount(addUcak)}</span>
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowDeployMenu(null)}
-                    className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium rounded-lg text-xs transition-colors border border-slate-700/50"
-                  >
-                    Vazgeç
-                  </button>
-                  <button
-                    onClick={() => {
-                      if (!hasAnySelected) return;
-                      setSave(prev => deployToFront(prev, showDeployMenu, deployDraft));
-                      setDeployDraft({});
-                      setShowDeployMenu(null);
-                    }}
-                    disabled={!hasAnySelected}
-                    className={`flex-1 py-2 font-bold rounded-lg text-xs transition-colors ${
-                      hasAnySelected
-                        ? 'bg-amber-700 hover:bg-amber-600 text-white'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
-                    }`}
-                  >
-                    {hasAnySelected ? 'Cepheye Gönder' : 'Birlik Seçilmedi'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
     </div>
   );
 }

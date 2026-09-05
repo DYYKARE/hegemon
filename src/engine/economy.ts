@@ -1,6 +1,7 @@
 import { GameSave, AiCountryEconomy, Difficulty } from './types';
 import { getCountryStats } from './countries';
 import { countryPopulation } from './countryData';
+import { countryRegions } from './activeWorld';
 
 // --- AI ülke ekonomisi yardımcıları ---
 // (economy.ts'te durur: hem ai.ts hem combat.ts kullanır, döngüsel import oluşmaz)
@@ -23,7 +24,9 @@ export function getAiEconomy(save: GameSave, countryId: string): AiCountryEconom
 // Ticaret anlaşması: ortağın tur gelirinin bu payı her tur oyuncuya akar.
 // (Sabit burada durur: computeIncome kullanır; diplomacy.ts buradan import eder —
 // tersi yönde import döngü yaratırdı.)
-export const TRADE_INCOME_SHARE = 0.05;
+// %5 → %3 (2026-07-15 denge): %5'te amorti 20 turdu — "herkesle hemen imzala"
+// dominant stratejiydi. ~33 tur amortiyle ticaret hâlâ kârlı ama artık bir tercih.
+export const TRADE_INCOME_SHARE = 0.03;
 
 // Birim maliyetleri ($)
 export const UNIT_COSTS: Record<string, number> = {
@@ -48,13 +51,8 @@ export const UNIT_UPKEEP: Record<string, number> = {
   kara_savunma: 40_000,
 };
 
-// Cephedeki birlikler seferberlik halindedir: bakımları 2 katıdır.
-// Uzun savaş hazineyi kemirir — barışın ekonomik değeri budur.
-export const FRONT_UPKEEP_MULT = 2;
-
 export interface UpkeepBreakdown {
-  home: number;   // yurttaki birliklerin bakımı
-  front: number;  // cephelerdeki orduların bakımı (x2)
+  home: number;   // birliklerin bakımı (tüm ordu illerde konuşludur)
   hunger: number; // iaşe açığından doğan EK asker bakımı (aç ordu pahalıya oturur)
   total: number;
 }
@@ -66,27 +64,16 @@ export function computeUpkeep(save: GameSave): UpkeepBreakdown {
       home += (UNIT_UPKEEP[type] || 0) * count;
     }
   }
-  let front = 0;
-  for (const war of save.wars) {
-    if (!war.front) continue;
-    front += (war.front.asker * UNIT_UPKEEP.asker
-      + war.front.tank * UNIT_UPKEEP.tank
-      + war.front.ucak * UNIT_UPKEEP.ucak) * FRONT_UPKEEP_MULT;
-  }
   // İaşe açığı: askerler tarımla beslenemiyorsa bakımları tam açlıkta 1.5 kata çıkar.
-  // (Yalnız asker — araçlar yemek yemez. Cephedeki askerin cezası da 2 kat bakım üzerinden.)
+  // (Yalnız asker — araçlar yemek yemez.)
   const shortage = 1 - armyFoodRatio(save);
   let hunger = 0;
   if (shortage > 0) {
     let homeAsker = 0;
     for (const units of Object.values(save.provinceUnits)) homeAsker += units.asker || 0;
-    let frontAsker = 0;
-    for (const war of save.wars) frontAsker += war.front?.asker || 0;
-    hunger = Math.round(
-      (homeAsker + frontAsker * FRONT_UPKEEP_MULT) * UNIT_UPKEEP.asker * HUNGER_UPKEEP_EXTRA * shortage
-    );
+    hunger = Math.round(homeAsker * UNIT_UPKEEP.asker * HUNGER_UPKEEP_EXTRA * shortage);
   }
-  return { home, front, hunger, total: home + front + hunger };
+  return { home, hunger, total: home + hunger };
 }
 
 // Savaş yorgunluğu: her aktif savaş mutluluğu tur başına aşındırır
@@ -158,7 +145,7 @@ export const INVESTMENT_RATES = {
 // --- Yatırım doygunluğu (azalan getiri) ---
 // Bir bölgenin tarım/sanayi kapasitesi sınırsız değildir: yatırım büyüdükçe marjinal
 // getiri hiperbolik düşer. Efektif yatırım SOFT_CAP'te yarıya iner ve bölge başına
-// rate×CAP getiriye asimptotik yaklaşır (sanayi: en çok ~$400M/tur/bölge).
+// rate×CAP getiriye asimptotik yaklaşır (sanayi: en çok $300M/tur/bölge).
 // Erken oyunda (≤$2B/bölge) etkisi ihmal edilir; geç oyunda "tek bölgeye sonsuz para
 // göm" sömürüsünü kapatır — gelir büyümesinin yolu YENİ bölgeler (fetih) olur.
 export const INVESTMENT_SOFT_CAP = 20_000_000_000; // $/bölge (yarı verim noktası)
@@ -177,7 +164,6 @@ export const HUNGER_UPKEEP_EXTRA = 0.5;   // tam açlıkta asker bakımına ekle
 export function totalAskerCount(save: GameSave): number {
   let n = 0;
   for (const units of Object.values(save.provinceUnits)) n += units.asker || 0;
-  for (const war of save.wars) n += war.front?.asker || 0;
   return n;
 }
 
@@ -212,7 +198,10 @@ export function armyFoodRatio(save: GameSave): number {
 export const POP_TAX_PER_CAPITA = 5;    // kişi başı TAM vergi kapasitesi $/tur (taxRate ile çarpılır)
 // %20 vergiyle kişi başı 1$/tur → başlangıç geliri ~85M (fiyat dengesiyle uyumlu)
 export const POP_GROWTH_RATE = 0.001;   // %0.1 / tur doğal artış
-export const POP_COST_PER_PERSON = 500; // nüfus teşviki: 500$ = 1 kişi (insan = vergi + asker kaynağı)
+// $500 → $200 (2026-07-15 denge): $500'de vergi amortisi 500 turdu — hiç mantıklı
+// değildi. $200'de ~200 tur: hâlâ salt gelir için kötü ama asıl işlevi olan
+// "acil asker havuzu büyütme" makul fiyatlanır.
+export const POP_COST_PER_PERSON = 200; // nüfus teşviki: 200$ = 1 kişi (insan = vergi + asker kaynağı)
 
 // --- Tarım → nüfus büyümesi ---
 // Tarım artık yalnız gelir değil, GIDA'dır: kişi başı tarım yatırımı arttıkça
@@ -317,16 +306,45 @@ export function investInConquered(save: GameSave, countryId: string, amount: num
   };
 }
 
+// Bir bölgenin (il/eyalet) YEREL tur geliri: vergi + tarım + sanayi.
+// TEK DOĞRU KAYNAK: computeIncome da, bölge/ülke detay panelleri de bu
+// fonksiyondan okur — küresel ve yerel gösterge asla birbirinden sapamaz.
+// İşgal altındaki bölgenin katkısı kesiktir (0 döner).
+export function provinceLocalIncome(save: GameSave, provId: string): number {
+  const inv = save.provinceInvestments[provId];
+  if (!inv || save.occupiedProvinces[provId]) return 0;
+  return (inv.nufus || 0) * POP_TAX_PER_CAPITA * (save.taxRate ?? 0.20)
+    + effectiveInvestment(inv.tarim || 0) * INVESTMENT_RATES.tarim
+    + effectiveInvestment(inv.sanayi || 0) * INVESTMENT_RATES.sanayi;
+}
+
+// Fethedilen ülkenin bölgelerine (eyaletlerine) yapılan YEREL yatırımların
+// tur geliri. computeIncome bunu provinceInvestments döngüsünde zaten sayar;
+// bu fonksiyon aynı rakamı ÜLKE DETAYINDA göstermek içindir.
+export function conqueredRegionalIncome(save: GameSave, countryId: string): number {
+  let total = 0;
+  for (const rid of countryRegions(countryId)) {
+    total += provinceLocalIncome(save, rid);
+  }
+  return Math.round(total);
+}
+
+// Fethedilen ülkenin GERÇEK toplam katkısı: devralınan ekonomi + halk vergisi
+// + kalkınma birikimi + eyaletlerine yapılan yerel yatırımların geliri.
+// (2026-07-15 düzeltmesi: eyalet yatırımı küresel gelire akıyordu ama ülke
+// detayı conqueredCountryIncome'u gösterdiğinden yerelde "eski statik değer"
+// kalıyordu — yerel katkı burada birleştirilerek UI tek kaynağa bağlandı.)
+export function conqueredCountryTotalIncome(save: GameSave, countryId: string): number {
+  return conqueredCountryIncome(save, countryId) + conqueredRegionalIncome(save, countryId);
+}
+
 // Tur başına toplam gelir: vergi + tarım + sanayi + fethedilen ülkeler.
-// İşgal altındaki illerin katkısı kesilir.
+// İşgal altındaki illerin katkısı kesilir. Bölge başına hesap
+// provinceLocalIncome'dadır — panellerle aynı kaynak.
 export function computeIncome(save: GameSave): number {
   let income = 0;
-  for (const [provId, inv] of Object.entries(save.provinceInvestments)) {
-    if (save.occupiedProvinces[provId]) continue;
-    // Vergi geliri: nüfus × kişi başı birim × vergi oranı
-    income += (inv.nufus || 0) * POP_TAX_PER_CAPITA * (save.taxRate ?? 0.20);
-    income += effectiveInvestment(inv.tarim || 0) * INVESTMENT_RATES.tarim;
-    income += effectiveInvestment(inv.sanayi || 0) * INVESTMENT_RATES.sanayi;
+  for (const provId of Object.keys(save.provinceInvestments)) {
+    income += provinceLocalIncome(save, provId);
   }
   for (const id of save.conqueredCountryIds) {
     income += conqueredCountryIncome(save, id);
