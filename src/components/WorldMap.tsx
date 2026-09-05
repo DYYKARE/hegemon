@@ -131,17 +131,6 @@ function roughenPolygon(poly: [number, number][]): [number, number][] {
   return out;
 }
 
-// Kontur genişliği. vectorEffect="non-scaling-stroke" kullanmıyoruz: Chromium
-// o niteliği taşıyan konturları CTM her değiştiğinde yeniden tessellate eder ve
-// binlerce il poligonuyla bu, yakınlaştırmayı gereksiz yere pahalılaştırıyor.
-// Bunun yerine kalınlıklar --map-sw (= 1/k) ile ölçeklenir; değişken yalnız k
-// değiştiğinde (rAF ile kare başına en fazla bir kez) yazılır.
-//
-// NOT: Sürüklemedeki asıl donmanın sebebi bu DEĞİLDİ — o, transform'un SVG
-// niteliğiyle uygulanmasıydı (aşağıya bak). Bu düzeltme tek başına cihazda
-// ölçülebilir bir fark yaratmadı; yakınlaştırma için tutuluyor.
-const sw = (w: number): React.CSSProperties => ({ strokeWidth: `calc(${w} * var(--map-sw, 1))` });
-
 const PILL_W = 52, PILL_H = 18, PILL_GAP = 3;
 
 function ChipGrid({ items }: { items: { type: string; count: number }[] }) {
@@ -335,6 +324,42 @@ export function WorldMap({
     return all.split('M').slice(1).map((s: string) => 'M' + s.trim()).filter((s: string) => s.length > 1);
   }, [geography, pathGenerator]);
 
+  // Canvas çizimi bileşenin ilerisinde tanımlanır (renk fonksiyonlarına ihtiyaç
+  // duyar), ama zoom effect'i burada kurulur → ref üzerinden çağrılır.
+  const sceneRef = useRef<{ ops: any[]; hits: { p: Path2D; id: string; name: string }[] }>({ ops: [], hits: [] });
+  const transformRef = useRef(d3.zoomIdentity);
+  const drawRef = useRef<() => void>(() => {});
+  const drawRaf2 = useRef(0);
+  const scheduleDraw = React.useCallback(() => {
+    if (drawRaf2.current) return;
+    drawRaf2.current = requestAnimationFrame(() => { drawRaf2.current = 0; drawRef.current(); });
+  }, []);
+  // Sürüklemenin sonundaki "click" seçim yapmasın: jest hareket ettiyse bastır.
+  const movedRef = useRef(false);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // Path2D önbelleği: yapımı pahalı (4000 path ≈ 38ms), geometri nadiren
+  // değişir. Aynı 'd' dizesi için nesne yeniden kullanılır; böylece sahne her
+  // render'da ucuzca yeniden kurulabilir.
+  const p2d = useRef(new Map<string, Path2D>());
+  const hitCanvas = useRef<CanvasRenderingContext2D | null>(null);
+
+  // DİKKAT: Bu hook'lar bilerek "Harita Yükleniyor" erken dönüşünün ÜSTÜNDE.
+  // Altına konurlarsa geography null iken çağrılmaz, dolu iken çağrılır →
+  // render'lar arasında hook sayısı değişir ve React bileşeni patlatır.
+  // Her render sonrası (renk/seçim/emir değişimi) ve boyut değişiminde yeniden çiz.
+  useEffect(() => { scheduleDraw(); });
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => scheduleDraw());
+    ro.observe(cv);
+    return () => ro.disconnect();
+  }, [scheduleDraw]);
+  // İptalde sayaç SIFIRLANMALI: StrictMode geliştirmede bileşeni söküp yeniden
+  // takıyor; sayaç sıfırlanmazsa scheduleDraw kalıcı olarak "zaten planlandı"
+  // sanır ve bir daha hiç çizmez (harita boş kalır).
+  useEffect(() => () => { if (drawRaf2.current) { cancelAnimationFrame(drawRaf2.current); drawRaf2.current = 0; } }, []);
+
   // Zoom
   const hasZoomedInitial = useRef(false);
 
@@ -354,12 +379,11 @@ export function WorldMap({
       const g = gRef.current;
       if (!g) return;
       const kk = pendingK.current;
-      g.style.setProperty('--map-sw', String(1 / kk));
       const bs = 1 / Math.max(kk, 3);
       g.querySelectorAll<SVGGElement>('g[data-badge]').forEach(el => el.setAttribute('transform', `scale(${bs})`));
     });
   }, []);
-  useEffect(() => () => { if (scaleRaf.current) cancelAnimationFrame(scaleRaf.current); }, []);
+  useEffect(() => () => { if (scaleRaf.current) { cancelAnimationFrame(scaleRaf.current); scaleRaf.current = 0; } }, []);
   useEffect(() => {
     if (!svgRef.current || !gRef.current || !geography || !world) return;
     // Katman terfisi: React'in silemeyeceği şekilde imperatif kuruluyor.
@@ -369,25 +393,22 @@ export function WorldMap({
     // ölçek kaybolmasın: kayıtlı k ile kontur/rozet ölçeğini geri yaz.
     applyZoomScale(lastZoomK.current);
     const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.5, 300])
+      .on('start', () => { movedRef.current = false; })
       .on('zoom', (event) => {
-        // Pan/zoom, SVG transform NİTELİĞİ yerine CSS transform ile uygulanır.
-        // Nitelik her değiştiğinde SVG alt ağacının tamamı (~800 poligon) yeniden
-        // boyanıyordu; CSS transform + will-change ile katman terfi ediyor ve
-        // sürükleme hazır rasterin kompozisyonuna iniyor.
-        //
-        // Xiaomi 2306EPN60G, Türkiye görünümü, aynı sürükleme protokolü
-        // (dumpsys gfxinfo, kare süresi medyanı):
-        //   SVG niteliği : 150ms  (p90 200ms, p99 450ms, %100 jank)
-        //   CSS transform:  25ms  (p90  27ms, p99  77ms,  %93 jank)
         const t = event.transform;
+        movedRef.current = true;
+        transformRef.current = t;
+        // Taban harita canvas'a yeniden çizilir (kare başına bir kez).
+        scheduleDraw();
+        // Rozet/ok katmanı SVG'de kalır: CSS transform ile taşınır. Nitelik
+        // yerine CSS kullanılır çünkü nitelik değişimi SVG alt ağacını yeniden
+        // boyatır; burada eleman sayısı az olsa da aynı kural geçerli.
         if (gRef.current) gRef.current.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
-        // Rozet ölçeği ve kontur genişliği YALNIZ k değiştiğinde güncellenir.
-        // Düz sürüklemede k sabittir; eskiden her karede tüm ağaç taranıp
-        // (querySelectorAll) her rozete yazılıyordu — pan'de tamamen boşa giden
-        // bir maliyetti. Artık pan saf bir GPU transform'u.
-        if (event.transform.k !== lastZoomK.current) {
-          lastZoomK.current = event.transform.k;
-          applyZoomScale(event.transform.k);
+        // Rozet ölçeği YALNIZ k değiştiğinde güncellenir; düz sürüklemede k
+        // sabit olduğundan bu iş tamamen atlanır.
+        if (t.k !== lastZoomK.current) {
+          lastZoomK.current = t.k;
+          applyZoomScale(t.k);
         }
       })
       // Görünüm oturumlar arası hatırlanır: her açılışta yeniden yakınlaştırmak
@@ -502,16 +523,196 @@ export function WorldMap({
     return isSelected ? shade(countryColor(cid), 55) : neutralTone(rid, cid); // nötr — ülke rengi
   };
 
+  // ————————————————————————————————————————————————————————————————
+  // TABAN HARİTA: CANVAS
+  //
+  // Taban harita (okyanus, deniz ızgarası, kıyı ışıması, ülke/il dolguları,
+  // sınırlar, seçim vurgusu) SVG değil canvas ile çizilir. Rozetler, emir
+  // okları ve animasyonlar SVG katmanında kalır — onlar az sayıda eleman.
+  //
+  // Sebep ölçüm (Xiaomi 2306EPN60G, aynı geometri, gerçek kare hızında):
+  //   SVG  : pan 8.3ms/kare, zoom 597→81ms/kare (ölçek değişince ~800 poligon
+  //          yeniden rasterleştiriliyor; kaçınılmaz)
+  //   Canvas: pan 8.3ms, zoom 8.3ms — ikisi de 120fps (ekranın tavanı)
+  // Aradaki fark yakınlaştırmada 10 kat; SVG'de bunu düzeltmenin yolu yoktu.
+  const P = (d: string): Path2D => {
+    let p = p2d.current.get(d);
+    if (!p) {
+      p = new Path2D(d);
+      if (p2d.current.size > 20000) p2d.current.clear();
+      p2d.current.set(d, p);
+    }
+    return p;
+  };
+
+  type Op =
+    | { p: Path2D; fill?: string; stroke?: string; lw?: number; round?: boolean }
+    | { clip: Path2D }
+    | { pop: true };
+
+  const ops: Op[] = [];
+  const hits: { p: Path2D; id: string; name: string }[] = [];
+  {
+    // KATMAN 0: uluslararası sular ızgarası
+    if (seaGridPath) ops.push({ p: P(seaGridPath), stroke: 'rgba(94,145,195,0.09)', lw: 0.5 });
+
+    // KATMAN 0.5: kıyı ışıması (iki katmanlı stroke, blur filtresi yok)
+    for (const d of landPaths) ops.push({ p: P(d), stroke: 'rgba(96,165,250,0.07)', lw: 7, round: true });
+    for (const d of landPaths) ops.push({ p: P(d), stroke: 'rgba(125,180,255,0.16)', lw: 2.5, round: true });
+
+    // KATMAN 1: bölünmemiş ülkeler
+    geography.features.forEach((feature: any, i: number) => {
+      const cid = String(feature.id ?? '');
+      if (cid && dividedCountries.has(cid)) return;
+      const d = pathGenerator(feature) || '';
+      if (!d) return;
+      const path = P(d);
+      const isSel = selectedId === cid;
+      const base = countryColor(cid || String(i));
+      ops.push({ p: path, fill: isSel ? shade(base, 55) : base, stroke: COUNTRY_OUTLINE, lw: 0.9, round: true });
+      if (interactive && cid) hits.push({ p: path, id: cid, name: feature.properties?.name ?? cid });
+    });
+
+    // KATMAN 2: bölünmüş ülkelerin bölgeleri
+    for (const [cid, cells] of Object.entries(cellsByCountry)) {
+      if (!hasRealProvinces(cid)) {
+        // Prosedürel Voronoi: ülke şekliyle kırpılır (SVG'deki clipPath karşılığı)
+        const feature = geography.features.find((f: any) => String(f.id) === cid);
+        const clipD = feature ? pathGenerator(feature) : null;
+        if (clipD) ops.push({ clip: P(clipD) });
+        for (const cell of cells) {
+          const rid = cell.regionId;
+          const isSel = selectedId === rid;
+          const isTarget = orders.some(o => o.to === rid);
+          const path = P(cell.d);
+          ops.push({
+            p: path, fill: regionFill(rid, cid, isSel || isTarget),
+            stroke: isSel ? '#fbbf24' : isTarget ? '#f87171' : BORDER_COLOR,
+            lw: isSel || isTarget ? 1.2 : 0.5, round: true,
+          });
+          if (interactive && world?.regions[rid]) hits.push({ p: path, id: rid, name: world.regions[rid].name });
+        }
+        if (clipD) ops.push({ pop: true });
+        continue;
+      }
+      // Gerçek iller: bölge başına önce koyu kontur geçişi, sonra dolgu geçişi.
+      // Bölge içi il kenarları kendi dolgusunun altında kalır → yalnız bölge
+      // sınırları okunur (SVG'deki iki geçişli mantığın aynısı).
+      const byRegion: Record<string, typeof cells> = {};
+      for (const c of cells) (byRegion[c.regionId] ??= []).push(c);
+      for (const [rid, rcells] of Object.entries(byRegion)) {
+        const isSel = selectedId === rid;
+        const isTarget = orders.some(o => o.to === rid);
+        const fill = regionFill(rid, cid, isSel || isTarget);
+        for (const c of rcells) ops.push({ p: P(c.d), stroke: BORDER_COLOR, lw: 2, round: true });
+        for (const c of rcells) {
+          const path = P(c.d);
+          ops.push({ p: path, fill, stroke: fill, lw: 0.4 });
+          if (interactive && world?.regions[rid]) hits.push({ p: path, id: rid, name: world.regions[rid].name });
+        }
+      }
+    }
+
+    // KATMAN 2.4: bölünmüş ülkelerin dış konturu (sınır hiyerarşisi)
+    for (const cid of dividedCountries) {
+      const feature = geography.features.find((f: any) => String(f.id) === cid);
+      const d = feature ? pathGenerator(feature) : null;
+      if (d) ops.push({ p: P(d), stroke: COUNTRY_OUTLINE, lw: 1.3, round: true });
+    }
+
+    // KATMAN 2.5: seçim / emir hedefi vurgusu — en üstte, komşu dolgular örtmesin
+    for (const rid of new Set([...orders.map(o => o.to), selectedId].filter((r): r is string => !!r))) {
+      const entry = Object.entries(cellsByCountry).find(([cid2, cells2]) =>
+        hasRealProvinces(cid2) && cells2.some(c => c.regionId === rid));
+      if (!entry) continue;
+      const [cid2, cells2] = entry;
+      const rcells = cells2.filter(c => c.regionId === rid);
+      const isSel = selectedId === rid;
+      const fill = regionFill(rid, cid2, true);
+      for (const c of rcells) ops.push({ p: P(c.d), stroke: isSel ? 'rgba(251,191,36,0.30)' : 'rgba(248,113,113,0.30)', lw: 5, round: true });
+      for (const c of rcells) ops.push({ p: P(c.d), stroke: isSel ? '#fbbf24' : '#f87171', lw: 2, round: true });
+      for (const c of rcells) ops.push({ p: P(c.d), fill, stroke: fill, lw: 0.5 });
+    }
+  }
+  sceneRef.current = { ops, hits };
+
+  // Sahneyi canvas'a çizer. Konturlar 1/k ile ölçeklenir → ekranda sabit
+  // kalınlık (SVG'deki non-scaling-stroke davranışının birebir karşılığı).
+  drawRef.current = () => {
+    const cv = canvasRef.current;
+    if (!cv) return;
+    const rect = cv.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const cw = Math.round(rect.width * dpr), ch = Math.round(rect.height * dpr);
+    if (cv.width !== cw || cv.height !== ch) { cv.width = cw; cv.height = ch; }
+    const ctx = cv.getContext('2d');
+    if (!ctx) return;
+
+    // Okyanus: zoom'dan bağımsız, ekran uzayında vinyetli radyal gradyan
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const gx = cw / 2, gy = ch * 0.42;
+    const grad = ctx.createRadialGradient(gx, gy, 0, gx, gy, Math.max(cw, ch) * 0.75);
+    grad.addColorStop(0, '#16233f');
+    grad.addColorStop(0.55, '#0e1830');
+    grad.addColorStop(1, '#070d1b');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, cw, ch);
+
+    // viewBox (1000×600) → ekran eşlemesi: SVG'deki object-contain ile aynı
+    const vbS = Math.min(rect.width / width, rect.height / height);
+    const offX = (rect.width - width * vbS) / 2, offY = (rect.height - height * vbS) / 2;
+    const t = transformRef.current;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.translate(offX, offY);
+    ctx.scale(vbS, vbS);
+    ctx.translate(t.x, t.y);
+    ctx.scale(t.k, t.k);
+
+    const inv = 1 / t.k;
+    let depth = 0;
+    for (const op of sceneRef.current.ops as Op[]) {
+      if ('clip' in op) { ctx.save(); ctx.clip(op.clip); depth++; continue; }
+      if ('pop' in op) { if (depth > 0) { ctx.restore(); depth--; } continue; }
+      if (op.fill) { ctx.fillStyle = op.fill; ctx.fill(op.p); }
+      if (op.stroke && op.lw) {
+        ctx.strokeStyle = op.stroke;
+        ctx.lineWidth = op.lw * inv;
+        ctx.lineJoin = op.round ? 'round' : 'miter';
+        ctx.lineCap = op.round ? 'round' : 'butt';
+        ctx.stroke(op.p);
+      }
+    }
+    while (depth-- > 0) ctx.restore();
+  };
+
+  // Tıklama: canvas'ta DOM isabet testi yok — nokta, sahnedeki Path2D'lere
+  // karşı sınanır (en üstte çizilen kazanır, o yüzden sondan başa taranır).
+  const handleMapClick = (e: React.MouseEvent<SVGRectElement>) => {
+    if (!interactive || !onSelect) return;
+    if (movedRef.current) { movedRef.current = false; return; } // sürüklemeydi
+    const svg = svgRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return;
+    const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
+    const t = transformRef.current;
+    const mx = (p.x - t.x) / t.k, my = (p.y - t.y) / t.k;
+    if (!hitCanvas.current) hitCanvas.current = document.createElement('canvas').getContext('2d');
+    const hc = hitCanvas.current;
+    if (!hc) return;
+    const hs = sceneRef.current.hits;
+    for (let i = hs.length - 1; i >= 0; i--) {
+      if (hc.isPointInPath(hs[i].p, mx, my)) { onSelect(hs[i].id, hs[i].name); return; }
+    }
+  };
+
   return (
     <div className="w-full h-full relative overflow-hidden bg-[#080e1d] flex items-center justify-center">
-      <svg ref={svgRef} data-testid="world-map" viewBox={`0 0 ${width} ${height}`} className="w-full h-full object-contain cursor-grab active:cursor-grabbing">
+      {/* Taban harita. SVG ile aynı kutuyu kaplar; ikisi de object-contain
+          eşlemesini kullandığı için koordinatları birebir örtüşür. */}
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+      <svg ref={svgRef} data-testid="world-map" viewBox={`0 0 ${width} ${height}`} className="w-full h-full object-contain cursor-grab active:cursor-grabbing relative">
         <defs>
-          {/* Okyanus derinlik gradyanı: merkez hafif aydınlık, kenarlara koyulaşır (vinyet) */}
-          <radialGradient id="oceanGrad" cx="50%" cy="42%" r="75%">
-            <stop offset="0%" stopColor="#16233f" />
-            <stop offset="55%" stopColor="#0e1830" />
-            <stop offset="100%" stopColor="#070d1b" />
-          </radialGradient>
           <marker id="attack-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
             <path d="M0,0 L8,4 L0,8 z" fill="#f87171" />
           </marker>
@@ -521,172 +722,16 @@ export function WorldMap({
           <marker id="sea-attack-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
             <path d="M0,0 L8,4 L0,8 z" fill="#38bdf8" />
           </marker>
-          {Object.keys(cellsByCountry).filter(cid => !hasRealProvinces(cid)).map(cid => {
-            const feature = geography.features.find((f: any) => String(f.id) === cid);
-            return feature ? (
-              <clipPath id={`clip-${cid}`} key={`clip-${cid}`}><path d={pathGenerator(feature) || ''} /></clipPath>
-            ) : null;
-          })}
         </defs>
-        {/* Okyanus zemini: zoom'dan bağımsız tam ekran gradyan (g dışında) */}
-        <rect x={0} y={0} width={width} height={height} fill="url(#oceanGrad)" />
-        {/* style prop'u YOK ve olmamalı: transform ile --map-sw buraya imperatif
-            yazılıyor (zoom effect'i). React'e bir style prop'u verilirse React o
-            elemanın inline stilini yönetmeye başlar ve her yeniden render'da
-            imperatif yazdıklarımızı siler — bu, konturların k katı kalın
-            çizilmesine yol açmıştı. */}
-        <g ref={gRef}>
-          {/* KATMAN 0: ULUSLARARASI SULAR — deniz/okyanus/göller hücrelere bölünmüş,
-              silik ızgara. Kimsenin değildir; çıkarma rotaları bu hücrelerden yürür. */}
-          {seaGridPath && (
-            <path
-              d={seaGridPath}
-              fill="none" stroke="rgba(94,145,195,0.09)" style={sw(0.5)}
-              className="pointer-events-none"
-            />
-          )}
-
-          {/* KATMAN 0.5: KIYI IŞIMASI — tüm kara kütlesinin altında iki katmanlı
-              açık mavi kontur. Konturun iç yarısı ülke dolgularının altında kalır;
-              dışarıda kalan yarısı kıyı boyunca yumuşak ışıma verir (blur filtresiz). */}
-          {landPaths.length > 0 && (
-            <g className="pointer-events-none">
-              {landPaths.map((d, i) => (
-                <path key={`lg-${i}`} d={d} fill="none" stroke="rgba(96,165,250,0.07)" style={sw(7)}
-                  strokeLinejoin="round" strokeLinecap="round" />
-              ))}
-              {landPaths.map((d, i) => (
-                <path key={`lc-${i}`} d={d} fill="none" stroke="rgba(125,180,255,0.16)" style={sw(2.5)}
-                  strokeLinejoin="round" strokeLinecap="round" />
-              ))}
-            </g>
-          )}
-
-          {/* KATMAN 1: bölünmemiş ülkeler (düz şekil) */}
-          {geography.features.map((feature: any, i: number) => {
-            const cid = String(feature.id ?? '');
-            if (cid && dividedCountries.has(cid)) return null;
-            const isSel = selectedId === cid;
-            return (
-              <path
-                key={`c-${cid || 'x'}-${i}`}
-                d={pathGenerator(feature) || ''}
-                fill={isSel ? shade(countryColor(cid || String(i)), 55) : countryColor(cid || String(i))}
-                stroke={COUNTRY_OUTLINE} style={sw(0.9)}
-                strokeLinejoin="round" strokeLinecap="round"
-                onClick={() => { if (interactive && cid && onSelect) onSelect(cid, feature.properties?.name ?? cid); }}
-                className={interactive ? 'cursor-pointer' : ''}
-              />
-            );
-          })}
-
-          {/* KATMAN 2: bölünmüş ülkelerin bölgeleri — gerçek il poligonları (veya Voronoi).
-              Gerçek-il modunda bölge HER ZAMAN tek parça çizilir: bölgenin illeri önce
-              koyu konturla, üstüne dolguyla (iki geçiş). Bölge İÇİ il kenarları kendi
-              dolgusunun altında kalır; bölgeler ARASI kenarlarda komşunun konturunun
-              yarısı görünür → haritada yalnız bölge sınırları okunur. */}
-          {Object.entries(cellsByCountry).map(([cid, cells]) => {
-            const real = hasRealProvinces(cid);
-            if (!real) {
-              // Prosedürel Voronoi: bölge zaten tek path — eski kontur mantığı güvenli
-              return (
-                <g key={`div-${cid}`} clipPath={`url(#clip-${cid})`}>
-                  {cells.map((cell, ci) => {
-                    const rid = cell.regionId;
-                    const isSel = selectedId === rid;
-                    const isOrderTarget = orders.some(o => o.to === rid);
-                    return (
-                      <path
-                        key={`${rid}-${ci}`}
-                        d={cell.d}
-                        fill={regionFill(rid, cid, isSel || isOrderTarget)}
-                        stroke={isSel ? '#fbbf24' : isOrderTarget ? '#f87171' : BORDER_COLOR}
-                        style={sw(isSel || isOrderTarget ? 1.2 : 0.5)}
-                        strokeLinejoin="round" strokeLinecap="round"
-                        onClick={(e) => { e.stopPropagation(); if (interactive && onSelect) onSelect(rid, world!.regions[rid].name); }}
-                        className="cursor-pointer"
-                      />
-                    );
-                  })}
-                </g>
-              );
-            }
-            // Gerçek iller: bölgeye göre grupla, bölge başına stroke+fill geçişi
-            const byRegion: Record<string, typeof cells> = {};
-            for (const c of cells) (byRegion[c.regionId] ??= []).push(c);
-            return (
-              <g key={`div-${cid}`}>
-                {Object.entries(byRegion).map(([rid, rcells]) => {
-                  const isSel = selectedId === rid;
-                  const isOrderTarget = orders.some(o => o.to === rid);
-                  const fill = regionFill(rid, cid, isSel || isOrderTarget);
-                  return (
-                    // hover bölge grubuna uygulanır: tek il değil, bütün bölge parlar
-                    <g key={`reg-${rid}`} className="cursor-pointer">
-                      {rcells.map((c, i) => (
-                        // 2px kontur: yarısı komşu bölgede kalıp görünür (~1px bölge sınırı);
-                        // dolgu geçişinin dikiş-kapatma konturu 0.2px'ini yer → net ~0.8px
-                        <path key={`s-${i}`} d={c.d} fill="none" stroke={BORDER_COLOR} style={sw(2)}
-                          strokeLinejoin="round" strokeLinecap="round"
-                          pointerEvents="none" />
-                      ))}
-                      {rcells.map((c, i) => (
-                        // dolgu kendi renginde ince konturla: iller arası antialias dikişini kapatır
-                        <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} style={sw(0.4)}
-                          onClick={(e) => { e.stopPropagation(); if (interactive && onSelect) onSelect(rid, world!.regions[rid].name); }}
-                        />
-                      ))}
-                    </g>
-                  );
-                })}
-              </g>
-            );
-          })}
-
-          {/* KATMAN 2.4: bölünmüş ülkelerin DIŞ konturu — iç bölge çizgilerinden
-              belirgin, açık gri; sınır hiyerarşisi (ülke > bölge) okunur hale gelir. */}
-          {[...dividedCountries].map(cid => {
-            const feature = geography.features.find((f: any) => String(f.id) === cid);
-            if (!feature) return null;
-            return (
-              <path key={`out-${cid}`} d={pathGenerator(feature) || ''} fill="none"
-                stroke={COUNTRY_OUTLINE} style={sw(1.3)}
-                strokeLinejoin="round" strokeLinecap="round"
-                pointerEvents="none" />
-            );
-          })}
-
-          {/* KATMAN 2.5: seçim/emir hedefi DIŞ konturu (gerçek-il modu) — tüm ülkelerden
-              sonra çizilir ki komşu ülkenin dolgusu konturun dış yarısını örtmesin. */}
-          {[...new Set([...orders.map(o => o.to), selectedId])]
-            .filter((rid): rid is string => !!rid)
-            .map(rid => {
-              const entry = Object.entries(cellsByCountry).find(([cid2, cells2]) =>
-                hasRealProvinces(cid2) && cells2.some(c => c.regionId === rid));
-              if (!entry) return null;
-              const [cid2, cells2] = entry;
-              const rcells = cells2.filter(c => c.regionId === rid);
-              const isSel = selectedId === rid;
-              const fill = regionFill(rid, cid2, true);
-              return (
-                <g key={`hl-${rid}`} pointerEvents="none">
-                  {/* dış yumuşak ışıma + net kontur: seçim "yükselmiş" hisseder */}
-                  {rcells.map((c, i) => (
-                    <path key={`g-${i}`} d={c.d} fill="none"
-                      stroke={isSel ? 'rgba(251,191,36,0.30)' : 'rgba(248,113,113,0.30)'}
-                      style={sw(5)} strokeLinejoin="round" />
-                  ))}
-                  {rcells.map((c, i) => (
-                    <path key={`o-${i}`} d={c.d} fill="none" stroke={isSel ? '#fbbf24' : '#f87171'}
-                      style={sw(2)} strokeLinejoin="round" />
-                  ))}
-                  {rcells.map((c, i) => (
-                    <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} style={sw(0.5)} />
-                  ))}
-                </g>
-              );
-            })}
-
+        {/* Saydam yakalama dikdörtgeni: taban harita artik canvas'ta oldugundan
+            SVG'de tiklanacak/suruklenecek boyali eleman kalmadi. d3.zoom ve
+            secim tiklamasi bu dikdortgen uzerinden calisir. */}
+        <rect x={0} y={0} width={width} height={height} fill="rgba(0,0,0,0)"
+          onClick={handleMapClick} className={interactive ? 'cursor-pointer' : ''} />
+        {/* style prop'u YOK ve olmamali: transform buraya imperatif yaziliyor
+            (zoom effect'i). React'e style prop'u verilirse React elemanin inline
+            stilini yonetmeye baslar ve imperatif yazdiklarimizi siler. */}
+        <g ref={gRef} pointerEvents="none">
           {/* (Şehir ışıkları katmanı denendi ve KALDIRILDI: harita-birimi yarıçap
               zoom'la büyüyüp balonlaşıyordu — kullanıcı istemedi, geri ekleme.) */}
 
