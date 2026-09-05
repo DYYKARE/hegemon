@@ -18,6 +18,7 @@ interface WorldMapProps {
   selectedId?: string | null;
   interactive?: boolean;
   playerCountryId: string;
+  playerColor?: string;
   provinceUnits?: Record<string, Record<string, number>>;
   provinceInvestments?: Record<string, Record<string, number>>;
   activeFilters?: string[];
@@ -130,6 +131,15 @@ function roughenPolygon(poly: [number, number][]): [number, number][] {
   return out;
 }
 
+// Kontur genişliği. vectorEffect="non-scaling-stroke" kullanmıyoruz: Chromium
+// o niteliği taşıyan alt ağacın konturlarını CTM her değiştiğinde — düz pan
+// dahil — yeniden tessellate eder; binlerce il poligonuyla bu, sürüklemeyi
+// GPU'dan alıp CPU'ya bağlıyor ve mobil WebView'de donmaya yol açıyordu.
+// Bunun yerine kalınlıklar --map-sw (= 1/k) ile ölçeklenir; değişken yalnız k
+// değiştiğinde (rAF ile kare başına en fazla bir kez) yazılır, dolayısıyla düz
+// sürüklemede hiç dokunulmaz ve pan saf bir GPU transform'u olarak kalır.
+const sw = (w: number): React.CSSProperties => ({ strokeWidth: `calc(${w} * var(--map-sw, 1))` });
+
 const PILL_W = 52, PILL_H = 18, PILL_GAP = 3;
 
 function ChipGrid({ items }: { items: { type: string; count: number }[] }) {
@@ -157,7 +167,7 @@ function ChipGrid({ items }: { items: { type: string; count: number }[] }) {
 }
 
 export function WorldMap({
-  onSelect, selectedId, interactive = true, playerCountryId,
+  onSelect, selectedId, interactive = true, playerCountryId, playerColor = '#1d4ed8',
   provinceUnits = {}, provinceInvestments = {}, activeFilters = [],
   conqueredCountryIds = [], occupiedProvinces = {}, occupiedGarrisons = {},
   warCountryIds = [], wars = [], capturedEnemyProvinces = [],
@@ -316,14 +326,36 @@ export function WorldMap({
 
   // Zoom
   const hasZoomedInitial = useRef(false);
+
+  // k'ya bağlı görsel düzeltmeler (kontur kalınlığı + rozet ölçeği) tek yerde ve
+  // rAF ile birleştirilmiş: pinch sırasında saniyede onlarca kez değil, kare
+  // başına en fazla bir kez DOM'a yazılır.
+  const scaleRaf = useRef(0);
+  const applyZoomScale = React.useCallback((k: number) => {
+    if (scaleRaf.current) return;
+    scaleRaf.current = requestAnimationFrame(() => {
+      scaleRaf.current = 0;
+      const g = gRef.current;
+      if (!g) return;
+      g.style.setProperty('--map-sw', String(1 / k));
+      const bs = 1 / Math.max(k, 3);
+      g.querySelectorAll<SVGGElement>('g[data-badge]').forEach(el => el.setAttribute('transform', `scale(${bs})`));
+    });
+  }, []);
+  useEffect(() => () => { if (scaleRaf.current) cancelAnimationFrame(scaleRaf.current); }, []);
   useEffect(() => {
     if (!svgRef.current || !gRef.current || !geography || !world) return;
     const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.5, 300])
       .on('zoom', (event) => {
-        d3.select(gRef.current).attr('transform', event.transform);
-        lastZoomK.current = event.transform.k;
-        const bs = 1 / Math.max(event.transform.k, 3);
-        gRef.current?.querySelectorAll<SVGGElement>('g[data-badge]').forEach(el => el.setAttribute('transform', `scale(${bs})`));
+        gRef.current?.setAttribute('transform', String(event.transform));
+        // Rozet ölçeği ve kontur genişliği YALNIZ k değiştiğinde güncellenir.
+        // Düz sürüklemede k sabittir; eskiden her karede tüm ağaç taranıp
+        // (querySelectorAll) her rozete yazılıyordu — pan'de tamamen boşa giden
+        // bir maliyetti. Artık pan saf bir GPU transform'u.
+        if (event.transform.k !== lastZoomK.current) {
+          lastZoomK.current = event.transform.k;
+          applyZoomScale(event.transform.k);
+        }
       })
       // Görünüm oturumlar arası hatırlanır: her açılışta yeniden yakınlaştırmak
       // (özellikle telefonda) yorucuydu. viewBox sabit (1000×600) olduğundan
@@ -348,6 +380,7 @@ export function WorldMap({
             const t = d3.zoomIdentity.translate(v.x, v.y).scale(v.k);
             d3.select(svgRef.current).call(zoom.transform, t);
             lastZoomK.current = v.k;
+            applyZoomScale(v.k);
             restored = true;
           }
         }
@@ -362,10 +395,11 @@ export function WorldMap({
           const t = d3.zoomIdentity.translate(width / 2 - scale * x, height / 2 - scale * y).scale(scale);
           d3.select(svgRef.current).transition().duration(750).call(zoom.transform, t);
           lastZoomK.current = scale;
+          applyZoomScale(scale);
         }
       }
     }
-  }, [geography, world, playerCountryId, pathGenerator]);
+  }, [geography, world, playerCountryId, pathGenerator, applyZoomScale]);
 
   if (!geography) {
     return <div className="flex items-center justify-center w-full h-full bg-slate-900 text-slate-400">Harita Yükleniyor...</div>;
@@ -378,32 +412,66 @@ export function WorldMap({
   // Sınır çizgisi: sert siyah yerine yarı saydam koyu ton + yuvarlak birleşim —
   // kuantalanmış (0.05°) poligonların basamaklı kenarları göze daha yumuşak gelir.
   const BORDER_COLOR = 'rgba(15,23,42,0.55)';
-  // Ülke DIŞ sınırı iç bölge çizgilerinden belirgin: sınır hiyerarşisi okunur
-  const COUNTRY_OUTLINE = 'rgba(148,163,184,0.28)';
+  // Ülke DIŞ sınırı: sert beyaz değil, YUMUŞAK açık-slate yarı saydam. Ülke
+  // renkleri zaten birbirinden ayrıştığı için sınırın işi sadece kenarı nazikçe
+  // belirtmek — iç il çizgileri (koyu/ince) ile karışmaz.
+  const COUNTRY_OUTLINE = 'rgba(196,214,238,0.42)';
 
-  // Bölge dolgusunda deterministik ton varyasyonu: aynı rengin ±%6 açık/koyu
-  // komşu tonları düz boya görünümünü kırar, "il" dokusu verir. Seçim tek parlak ton.
-  const toneOf = (rid: string, tones: string[]): string => {
-    let h = 0; for (let i = 0; i < rid.length; i++) h = (h * 31 + rid.charCodeAt(i)) >>> 0;
-    return tones[h % tones.length];
+  // Deterministik string→sayı (renk seçimi ve ton varyasyonu için)
+  const hashOf = (s: string): number => {
+    let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return h;
   };
-  const T_PLAYER = ['#1d4ed8', '#2453e0', '#1b46c2', '#2050cf'];
-  const T_ENEMY = ['#7f1d1d', '#8a2121', '#741a1a', '#932420'];
-  const T_NEUTRAL = ['#334155', '#36455b', '#2f3d50', '#38465c'];
+  const toneOf = (rid: string, tones: string[]): string => tones[hashOf(rid) % tones.length];
+  // Bir hex rengin RGB'sini eşit miktarda açar/koyar — il başına hafif doku
+  const shade = (hex: string, d: number): string => {
+    const n = parseInt(hex.slice(1), 16);
+    const cl = (v: number) => Math.max(0, Math.min(255, v));
+    const r = cl(((n >> 16) & 255) + d), g = cl(((n >> 8) & 255) + d), b = cl((n & 255) + d);
+    return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
+  };
+  // Oyuncu toprağı: seçilen renkten türer (il başına ±parlaklıkla doku). Sabit
+  // mavi paletin yerini alır — oyuncu yeni oyunda rengini seçer.
+  const playerTone = (rid: string): string =>
+    shade(playerColor, [-12, -6, 0, 6, 12][hashOf(rid) % 5]);
+  // Oyuncu KIRMIZI bandında bir renk seçtiyse düşman/işgal paleti turuncu-kahveye
+  // kayar: "benim kızılım" ile "savaştaki düşman" haritada ayırt edilemiyordu
+  // (2026-07-15 çocuk-persona testi). Kırmızı bandı: R baskın, G ve B zayıf.
+  const pcNum = parseInt(playerColor.slice(1), 16);
+  const playerIsRed = ((pcNum >> 16) & 255) > 140
+    && ((pcNum >> 16) & 255) > ((pcNum >> 8) & 255) * 1.8
+    && ((pcNum >> 16) & 255) > (pcNum & 255) * 1.8;
+  const T_ENEMY = playerIsRed
+    ? ['#9a3412', '#a63f12', '#8f300f', '#ab4517']  // turuncu-kahve (savaş)
+    : ['#7f1d1d', '#8a2121', '#741a1a', '#932420']; // klasik koyu kırmızı
+  const ENEMY_SEL = playerIsRed ? '#fb923c' : '#ef4444';
+  const OCCUPIED_FILL = playerIsRed ? '#c2410c' : '#991b1b';
+  // Nötr ülkeler artık GRİ DEĞİL: her ülke kendi mat renginde (modern siyasi
+  // harita). Palet, oyuncu mavisi (~220°) ve düşman kırmızısı (~0°) bantlarından
+  // kasıtlı uzak — karışmasın; hepsi mat ve orta-koyu, koyu okyanusta ayrışır ama
+  // göz yormaz. Bir ülkenin tüm illeri aynı renk ailesinde (il başına ±parlaklık).
+  const NEUTRAL_PALETTE = [
+    '#2f7d72', '#348a5b', '#6f7a34', '#a5842f', '#b0703a',
+    '#8a5a3e', '#6b4a9c', '#95468b', '#4c509e', '#3f6f7d',
+    '#7a4f68', '#4a7a4e',
+  ];
+  const countryColor = (cid: string): string => NEUTRAL_PALETTE[hashOf(cid) % NEUTRAL_PALETTE.length];
+  const neutralTone = (rid: string, cid: string): string =>
+    shade(countryColor(cid), [-14, -7, 0, 7, 14][hashOf(rid) % 5]);
 
   // Bölge sahiplik/renk. Seçili bölge PARLAK dolguyla vurgulanır (gerçek-il modunda
   // sarı kontur patchwork yaratmasın diye seçim renkle gösterilir).
   const regionFill = (rid: string, cid: string, isSelected: boolean): string => {
-    if (occupiedProvinces[rid]) return isSelected ? '#ef4444' : '#991b1b';   // bizim ilimiz işgalde
-    if (captured.has(rid)) return isSelected ? '#60a5fa' : toneOf(rid, T_PLAYER); // ele geçirdik
-    if (cid === playerCountryId || conquered.has(cid)) return isSelected ? '#60a5fa' : toneOf(rid, T_PLAYER); // bizim
-    if (atWar.has(cid)) return isSelected ? '#ef4444' : toneOf(rid, T_ENEMY); // düşman (savaş)
-    return isSelected ? '#64748b' : toneOf(rid, T_NEUTRAL);                   // nötr
+    if (occupiedProvinces[rid]) return isSelected ? ENEMY_SEL : OCCUPIED_FILL; // bizim ilimiz işgalde
+    if (captured.has(rid)) return isSelected ? shade(playerColor, 60) : playerTone(rid); // ele geçirdik
+    if (cid === playerCountryId || conquered.has(cid)) return isSelected ? shade(playerColor, 60) : playerTone(rid); // bizim
+    if (atWar.has(cid)) return isSelected ? ENEMY_SEL : toneOf(rid, T_ENEMY); // düşman (savaş)
+    return isSelected ? shade(countryColor(cid), 55) : neutralTone(rid, cid); // nötr — ülke rengi
   };
 
   return (
     <div className="w-full h-full relative overflow-hidden bg-[#080e1d] flex items-center justify-center">
-      <svg ref={svgRef} viewBox={`0 0 ${width} ${height}`} className="w-full h-full object-contain cursor-grab active:cursor-grabbing">
+      <svg ref={svgRef} data-testid="world-map" viewBox={`0 0 ${width} ${height}`} className="w-full h-full object-contain cursor-grab active:cursor-grabbing">
         <defs>
           {/* Okyanus derinlik gradyanı: merkez hafif aydınlık, kenarlara koyulaşır (vinyet) */}
           <radialGradient id="oceanGrad" cx="50%" cy="42%" r="75%">
@@ -435,8 +503,8 @@ export function WorldMap({
           {seaGridPath && (
             <path
               d={seaGridPath}
-              fill="none" stroke="rgba(94,145,195,0.09)" strokeWidth={0.5}
-              vectorEffect="non-scaling-stroke" className="pointer-events-none"
+              fill="none" stroke="rgba(94,145,195,0.09)" style={sw(0.5)}
+              className="pointer-events-none"
             />
           )}
 
@@ -445,10 +513,10 @@ export function WorldMap({
               dışarıda kalan yarısı kıyı boyunca yumuşak ışıma verir (blur filtresiz). */}
           {landD && (
             <g className="pointer-events-none">
-              <path d={landD} fill="none" stroke="rgba(96,165,250,0.07)" strokeWidth={7}
-                strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
-              <path d={landD} fill="none" stroke="rgba(125,180,255,0.16)" strokeWidth={2.5}
-                strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+              <path d={landD} fill="none" stroke="rgba(96,165,250,0.07)" style={sw(7)}
+                strokeLinejoin="round" strokeLinecap="round" />
+              <path d={landD} fill="none" stroke="rgba(125,180,255,0.16)" style={sw(2.5)}
+                strokeLinejoin="round" strokeLinecap="round" />
             </g>
           )}
 
@@ -461,15 +529,12 @@ export function WorldMap({
               <path
                 key={`c-${cid || 'x'}-${i}`}
                 d={pathGenerator(feature) || ''}
-                fill={isSel ? '#475569' : toneOf(cid || String(i), T_NEUTRAL)}
-                stroke={COUNTRY_OUTLINE} strokeWidth={0.6}
+                fill={isSel ? shade(countryColor(cid || String(i)), 55) : countryColor(cid || String(i))}
+                stroke={COUNTRY_OUTLINE} style={sw(0.9)}
                 strokeLinejoin="round" strokeLinecap="round"
-                vectorEffect="non-scaling-stroke"
                 onClick={() => { if (interactive && cid && onSelect) onSelect(cid, feature.properties?.name ?? cid); }}
-                className={interactive ? 'hover:fill-slate-600 transition-colors cursor-pointer' : ''}
-              >
-                <title>{feature.properties?.name}</title>
-              </path>
+                className={interactive ? 'cursor-pointer' : ''}
+              />
             );
           })}
 
@@ -494,14 +559,11 @@ export function WorldMap({
                         d={cell.d}
                         fill={regionFill(rid, cid, isSel || isOrderTarget)}
                         stroke={isSel ? '#fbbf24' : isOrderTarget ? '#f87171' : BORDER_COLOR}
-                        strokeWidth={isSel || isOrderTarget ? 1.2 : 0.5}
+                        style={sw(isSel || isOrderTarget ? 1.2 : 0.5)}
                         strokeLinejoin="round" strokeLinecap="round"
-                        vectorEffect="non-scaling-stroke"
                         onClick={(e) => { e.stopPropagation(); if (interactive && onSelect) onSelect(rid, world!.regions[rid].name); }}
-                        className="hover:opacity-85 cursor-pointer transition-all"
-                      >
-                        <title>{world!.regions[rid].name}</title>
-                      </path>
+                        className="cursor-pointer"
+                      />
                     );
                   })}
                 </g>
@@ -518,22 +580,19 @@ export function WorldMap({
                   const fill = regionFill(rid, cid, isSel || isOrderTarget);
                   return (
                     // hover bölge grubuna uygulanır: tek il değil, bütün bölge parlar
-                    <g key={`reg-${rid}`} className="cursor-pointer hover:opacity-85 transition-all">
+                    <g key={`reg-${rid}`} className="cursor-pointer">
                       {rcells.map((c, i) => (
                         // 2px kontur: yarısı komşu bölgede kalıp görünür (~1px bölge sınırı);
                         // dolgu geçişinin dikiş-kapatma konturu 0.2px'ini yer → net ~0.8px
-                        <path key={`s-${i}`} d={c.d} fill="none" stroke={BORDER_COLOR} strokeWidth={2}
+                        <path key={`s-${i}`} d={c.d} fill="none" stroke={BORDER_COLOR} style={sw(2)}
                           strokeLinejoin="round" strokeLinecap="round"
-                          vectorEffect="non-scaling-stroke" pointerEvents="none" />
+                          pointerEvents="none" />
                       ))}
                       {rcells.map((c, i) => (
                         // dolgu kendi renginde ince konturla: iller arası antialias dikişini kapatır
-                        <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} strokeWidth={0.4}
-                          vectorEffect="non-scaling-stroke"
+                        <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} style={sw(0.4)}
                           onClick={(e) => { e.stopPropagation(); if (interactive && onSelect) onSelect(rid, world!.regions[rid].name); }}
-                        >
-                          <title>{world!.regions[rid].name}</title>
-                        </path>
+                        />
                       ))}
                     </g>
                   );
@@ -549,9 +608,9 @@ export function WorldMap({
             if (!feature) return null;
             return (
               <path key={`out-${cid}`} d={pathGenerator(feature) || ''} fill="none"
-                stroke={COUNTRY_OUTLINE} strokeWidth={0.9}
+                stroke={COUNTRY_OUTLINE} style={sw(1.3)}
                 strokeLinejoin="round" strokeLinecap="round"
-                vectorEffect="non-scaling-stroke" pointerEvents="none" />
+                pointerEvents="none" />
             );
           })}
 
@@ -573,15 +632,14 @@ export function WorldMap({
                   {rcells.map((c, i) => (
                     <path key={`g-${i}`} d={c.d} fill="none"
                       stroke={isSel ? 'rgba(251,191,36,0.30)' : 'rgba(248,113,113,0.30)'}
-                      strokeWidth={5} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                      style={sw(5)} strokeLinejoin="round" />
                   ))}
                   {rcells.map((c, i) => (
                     <path key={`o-${i}`} d={c.d} fill="none" stroke={isSel ? '#fbbf24' : '#f87171'}
-                      strokeWidth={2} strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
+                      style={sw(2)} strokeLinejoin="round" />
                   ))}
                   {rcells.map((c, i) => (
-                    <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} strokeWidth={0.5}
-                      vectorEffect="non-scaling-stroke" />
+                    <path key={`f-${i}`} d={c.d} fill={fill} stroke={fill} style={sw(0.5)} />
                   ))}
                 </g>
               );
