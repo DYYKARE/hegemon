@@ -132,12 +132,14 @@ function roughenPolygon(poly: [number, number][]): [number, number][] {
 }
 
 // Kontur genişliği. vectorEffect="non-scaling-stroke" kullanmıyoruz: Chromium
-// o niteliği taşıyan alt ağacın konturlarını CTM her değiştiğinde — düz pan
-// dahil — yeniden tessellate eder; binlerce il poligonuyla bu, sürüklemeyi
-// GPU'dan alıp CPU'ya bağlıyor ve mobil WebView'de donmaya yol açıyordu.
+// o niteliği taşıyan konturları CTM her değiştiğinde yeniden tessellate eder ve
+// binlerce il poligonuyla bu, yakınlaştırmayı gereksiz yere pahalılaştırıyor.
 // Bunun yerine kalınlıklar --map-sw (= 1/k) ile ölçeklenir; değişken yalnız k
-// değiştiğinde (rAF ile kare başına en fazla bir kez) yazılır, dolayısıyla düz
-// sürüklemede hiç dokunulmaz ve pan saf bir GPU transform'u olarak kalır.
+// değiştiğinde (rAF ile kare başına en fazla bir kez) yazılır.
+//
+// NOT: Sürüklemedeki asıl donmanın sebebi bu DEĞİLDİ — o, transform'un SVG
+// niteliğiyle uygulanmasıydı (aşağıya bak). Bu düzeltme tek başına cihazda
+// ölçülebilir bir fark yaratmadı; yakınlaştırma için tutuluyor.
 const sw = (w: number): React.CSSProperties => ({ strokeWidth: `calc(${w} * var(--map-sw, 1))` });
 
 const PILL_W = 52, PILL_H = 18, PILL_GAP = 3;
@@ -331,23 +333,45 @@ export function WorldMap({
   // rAF ile birleştirilmiş: pinch sırasında saniyede onlarca kez değil, kare
   // başına en fazla bir kez DOM'a yazılır.
   const scaleRaf = useRef(0);
+  const pendingK = useRef(0);
   const applyZoomScale = React.useCallback((k: number) => {
+    // Bekleyen k HER ÇAĞRIDA güncellenir; rAF yalnız bir kez planlanır. (Önce
+    // "rAF bekliyorsa çık" deniyordu — bu, ilk değeri yazıp sonrakileri
+    // düşürüyordu ve pinch'te yanlış ölçekte kalınıyordu.)
+    pendingK.current = k;
     if (scaleRaf.current) return;
     scaleRaf.current = requestAnimationFrame(() => {
       scaleRaf.current = 0;
       const g = gRef.current;
       if (!g) return;
-      g.style.setProperty('--map-sw', String(1 / k));
-      const bs = 1 / Math.max(k, 3);
+      const kk = pendingK.current;
+      g.style.setProperty('--map-sw', String(1 / kk));
+      const bs = 1 / Math.max(kk, 3);
       g.querySelectorAll<SVGGElement>('g[data-badge]').forEach(el => el.setAttribute('transform', `scale(${bs})`));
     });
   }, []);
   useEffect(() => () => { if (scaleRaf.current) cancelAnimationFrame(scaleRaf.current); }, []);
   useEffect(() => {
     if (!svgRef.current || !gRef.current || !geography || !world) return;
+    // Katman terfisi: React'in silemeyeceği şekilde imperatif kuruluyor.
+    gRef.current.style.willChange = 'transform';
+    gRef.current.style.transformOrigin = '0 0';
+    // Yeniden render sonrası (React g'yi yeniden oluşturmuş olabilir) mevcut
+    // ölçek kaybolmasın: kayıtlı k ile kontur/rozet ölçeğini geri yaz.
+    applyZoomScale(lastZoomK.current);
     const zoom = d3.zoom<SVGSVGElement, unknown>().scaleExtent([0.5, 300])
       .on('zoom', (event) => {
-        gRef.current?.setAttribute('transform', String(event.transform));
+        // Pan/zoom, SVG transform NİTELİĞİ yerine CSS transform ile uygulanır.
+        // Nitelik her değiştiğinde SVG alt ağacının tamamı (~800 poligon) yeniden
+        // boyanıyordu; CSS transform + will-change ile katman terfi ediyor ve
+        // sürükleme hazır rasterin kompozisyonuna iniyor.
+        //
+        // Xiaomi 2306EPN60G, Türkiye görünümü, aynı sürükleme protokolü
+        // (dumpsys gfxinfo, kare süresi medyanı):
+        //   SVG niteliği : 150ms  (p90 200ms, p99 450ms, %100 jank)
+        //   CSS transform:  25ms  (p90  27ms, p99  77ms,  %93 jank)
+        const t = event.transform;
+        if (gRef.current) gRef.current.style.transform = `translate(${t.x}px, ${t.y}px) scale(${t.k})`;
         // Rozet ölçeği ve kontur genişliği YALNIZ k değiştiğinde güncellenir.
         // Düz sürüklemede k sabittir; eskiden her karede tüm ağaç taranıp
         // (querySelectorAll) her rozete yazılıyordu — pan'de tamamen boşa giden
@@ -497,6 +521,11 @@ export function WorldMap({
         </defs>
         {/* Okyanus zemini: zoom'dan bağımsız tam ekran gradyan (g dışında) */}
         <rect x={0} y={0} width={width} height={height} fill="url(#oceanGrad)" />
+        {/* style prop'u YOK ve olmamalı: transform ile --map-sw buraya imperatif
+            yazılıyor (zoom effect'i). React'e bir style prop'u verilirse React o
+            elemanın inline stilini yönetmeye başlar ve her yeniden render'da
+            imperatif yazdıklarımızı siler — bu, konturların k katı kalın
+            çizilmesine yol açmıştı. */}
         <g ref={gRef}>
           {/* KATMAN 0: ULUSLARARASI SULAR — deniz/okyanus/göller hücrelere bölünmüş,
               silik ızgara. Kimsenin değildir; çıkarma rotaları bu hücrelerden yürür. */}
