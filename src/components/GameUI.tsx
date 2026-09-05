@@ -1575,10 +1575,14 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
 
       {/* Top HUD — relative + z-20: istatistik detay popover'ı bu bara çapalanır
           ve harita üstü öğelerin (z-10 filtre barı) üzerinde kalır */}
-      <div className="relative flex justify-between items-center px-4 py-2 bg-slate-900 border-b border-slate-800 z-20 shrink-0 gap-3 flex-wrap">
-        <div className="flex items-center gap-4 min-w-0">
+      {/* Yükseklik oyun alanından çalınır: telefon yatayda ekran ~406px ve bu bar
+          iki satıra sarınca ~120px'ini, yani üçte birini yiyordu. Ölçüler tek
+          satıra sığacak şekilde sıkıldı; dar ekranda hâlâ sarabilir (Menü
+          butonu asla ekran dışına taşmamalı — 2026-07-14 mobil testi). */}
+      <div className="relative flex justify-between items-center px-3 py-1 bg-slate-900 border-b border-slate-800 z-20 shrink-0 gap-2 flex-wrap">
+        <div className="flex items-center gap-2.5 min-w-0">
           <div className="shrink-0">
-            <h2 className="text-lg font-bold text-white leading-tight">{countryName(save.playerCountryId)}</h2>
+            <h2 className="text-base font-bold text-white leading-tight">{countryName(save.playerCountryId)}</h2>
             {/* data-testid + data-turn: E2E paketi turu metin ayrıştırmadan okur
                 (metin biçimi değişse de test kırılmaz) */}
             <div data-testid="turn-indicator" data-turn={save.turn} className="text-[10px] font-mono text-slate-400">
@@ -1586,11 +1590,11 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             </div>
           </div>
 
-          <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 shrink-0">
+          <div className="flex items-center gap-0.5 bg-slate-950 p-0.5 rounded-lg border border-slate-800 shrink-0">
             <button
               data-testid="next-turn"
               onClick={() => { setAutoPlaySpeed(null); nextTurn(); }}
-              className={`px-3 py-1.5 rounded text-xs font-medium border mr-1 hit-target press-fx ${
+              className={`px-2.5 py-1 rounded text-xs font-medium border mr-0.5 hit-target press-fx ${
                 save.pendingOrders.length > 0
                   ? 'bg-red-900/50 hover:bg-red-800/60 active:bg-red-800 text-red-200 border-red-800/70'
                   : 'bg-slate-800 hover:bg-slate-700 active:bg-slate-600 text-slate-300 border-slate-700'
@@ -1598,16 +1602,16 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             >
               Sonraki Tur{save.pendingOrders.length > 0 ? ` ⚔️${save.pendingOrders.length}` : ''}
             </button>
-            <button onClick={() => setAutoPlaySpeed(null)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === null ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Durdur">
+            <button onClick={() => setAutoPlaySpeed(null)} className={`p-1 rounded hit-target-sm press-fx ${autoPlaySpeed === null ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Durdur">
               <Pause className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(1500)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 1500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Normal Hız (1.5s)">
+            <button onClick={() => setAutoPlaySpeed(1500)} className={`p-1 rounded hit-target-sm press-fx ${autoPlaySpeed === 1500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Normal Hız (1.5s)">
               <Play className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(1000)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 1000 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Hızlı (1s)">
+            <button onClick={() => setAutoPlaySpeed(1000)} className={`p-1 rounded hit-target-sm press-fx ${autoPlaySpeed === 1000 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Hızlı (1s)">
               <FastForward className="w-4 h-4" />
             </button>
-            <button onClick={() => setAutoPlaySpeed(500)} className={`p-1.5 rounded hit-target-sm press-fx ${autoPlaySpeed === 500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Çok Hızlı (0.5s)">
+            <button onClick={() => setAutoPlaySpeed(500)} className={`p-1 rounded hit-target-sm press-fx ${autoPlaySpeed === 500 ? 'bg-blue-500/20 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`} title="Çok Hızlı (0.5s)">
               <SkipForward className="w-4 h-4" />
             </button>
           </div>
@@ -1618,12 +1622,17 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             çıkamıyor, vergi değiştiremiyordu (2026-07-14 mobil testi). */}
         {/* relative z-30: popover'ın clickOutside arka planının (z-20) ÜSTÜNDE kalır —
             panel açıkken başka bir istatistiğe tıklamak panele geçiş yapar, kapatmaz */}
-        <div className="relative z-30 flex gap-x-3 sm:gap-x-4 gap-y-1 items-center flex-wrap justify-end min-w-0">
+        {/* Aralık 12px'in ALTINA İNMEMELİ: .hit-target-sm her butonun tıklama
+            alanını her yönde 6px genişletir, 12px'ten dar aralıkta komşuların
+            çeperleri çakışır ve iki istatistiğin arasına dokunmak yanlış paneli
+            açar (playtest S2 Hitbox bunu yakalıyor). Yatay yer buradan değil,
+            hazine alt satırını daraltarak kazanıldı. */}
+        <div className="relative z-30 flex gap-x-3 gap-y-3 items-center flex-wrap justify-end min-w-0">
           <button
             onClick={() => toggleStatPanel('hazine')}
             aria-expanded={activeStatPanel === 'hazine'}
             title="Gelir ve gider detaylarını göster"
-            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+            className={`flex flex-col items-end text-right px-1.5 py-0.5 rounded-lg border cursor-pointer hit-target-sm press-fx ${
               activeStatPanel === 'hazine'
                 ? 'bg-slate-800/80 border-slate-700'
                 : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
@@ -1634,10 +1643,14 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             <span data-testid="treasury" data-money={save.money} className="text-sm font-mono text-green-400 font-bold leading-tight"><AnimatedNumber value={save.money} format={formatMoney} /></span>
             <span className={`text-[9px] font-mono ${netIncome >= 0 ? 'text-green-600' : 'text-red-500'}`} title={`Gelir: +${formatMoney(income)} · Ordu bakımı: −${formatMoney(upkeep.total)}${upkeep.hunger > 0 ? ` (açlık zammı: ${formatMoney(upkeep.hunger)})` : ''}`}>
               {netIncome >= 0 ? '+' : ''}{formatMoney(netIncome)}/tur
-              {upkeep.total > 0 && <span className="text-red-600/80"> · bakım {formatMoney(upkeep.total)}</span>}
+              {/* Bakım ve iaşe yalnız geniş ekranda satır içinde: telefonda bu iki
+                  ek, barı ikinci satıra sarıp haritadan ~60px çalıyordu. İkisi de
+                  hazine panelinde kalem kalem duruyor (butona dokun). İaşe düşükse
+                  uyarı gizlenmez — kritik bilgi, dar ekranda da görünür. */}
+              {upkeep.total > 0 && <span className="hidden lg:inline text-red-600/80"> · bakım {formatMoney(upkeep.total)}</span>}
               {askerTotal > 0 && (
                 <span
-                  className={foodRatio < 1 ? 'text-amber-400 font-bold' : 'text-slate-500'}
+                  className={foodRatio < 1 ? 'text-amber-400 font-bold' : 'hidden lg:inline text-slate-500'}
                   title={foodRatio < 1
                     ? 'Ordu iaşesi yetersiz: tarım, askerleri besleyemiyor — asker bakımı artıyor, halk huzursuz. Tarıma yatırım yapın.'
                     : 'Ordu iaşesi tam: tarım orduyu besliyor.'}
@@ -1649,7 +1662,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             onClick={() => toggleStatPanel('nufus')}
             aria-expanded={activeStatPanel === 'nufus'}
             title="Bölge nüfusları ve büyüme detaylarını göster"
-            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+            className={`flex flex-col items-end text-right px-1.5 py-0.5 rounded-lg border cursor-pointer hit-target-sm press-fx ${
               activeStatPanel === 'nufus'
                 ? 'bg-slate-800/80 border-slate-700'
                 : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
@@ -1663,7 +1676,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
             onClick={() => toggleStatPanel('ordu')}
             aria-expanded={activeStatPanel === 'ordu'}
             title="Ordu kompozisyonu ve güç detaylarını göster"
-            className={`flex flex-col items-end text-right px-2 py-1 rounded-lg border cursor-pointer hit-target-sm press-fx ${
+            className={`flex flex-col items-end text-right px-1.5 py-0.5 rounded-lg border cursor-pointer hit-target-sm press-fx ${
               activeStatPanel === 'ordu'
                 ? 'bg-slate-800/80 border-slate-700'
                 : 'border-transparent hover:bg-slate-800/60 active:bg-slate-800'
@@ -1678,10 +1691,10 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
           {/* Mutluluk & Vergi göstergesi */}
           <button
             onClick={() => setShowTaxPanel(!showTaxPanel)}
-            className="flex items-center gap-2 cursor-pointer hover:bg-slate-800/80 px-2.5 py-1 rounded-lg border border-slate-700/50 hover:opacity-100 hit-target-sm press-fx"
+            className="flex items-center gap-1.5 cursor-pointer hover:bg-slate-800/80 px-1.5 py-0.5 rounded-lg border border-slate-700/50 hover:opacity-100 hit-target-sm press-fx"
             title="Vergi & Mutluluk Ayarları"
           >
-            <Coins className="w-5 h-5 text-yellow-500 shrink-0" />
+            <Coins className="w-4 h-4 text-yellow-500 shrink-0" />
             <div className="flex flex-col items-end">
               <span className="text-[10px] text-slate-400 font-medium">MUTLULUK & VERGİ</span>
               <span className="text-sm font-bold leading-tight" style={{
@@ -1696,7 +1709,7 @@ export function GameUI({ initialSave, onExitToMenu }: GameUIProps) {
           </button>
           <button
             onClick={() => { setAutoPlaySpeed(null); setShowPauseMenu(true); }}
-            className="p-2 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 text-slate-300 hit-target-sm press-fx"
+            className="p-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 text-slate-300 hit-target-sm press-fx"
             title="Menü"
           >
             <Menu className="w-4 h-4" />
